@@ -1,0 +1,43 @@
+{
+  "name": "specguard-ts",
+  "version": "0.0.0",
+  "description": "The TypeScript client for SpecGuard: a Vitest/Jest reporter that ships test-run telemetry, and a CLI linter that validates OpenTestIntent @intent annotations.",
+  "license": "MIT",
+  "homepage": "https://github.com/yatfa-ai/specguard-ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yatfa-ai/specguard-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yatfa-ai/specguard-ts/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "//": "SCAFFOLD. No implementation exists yet — README.md is the contract it is held to. The exports and bins below declare the surface the implementation must land on; none of the referenced files are written.",
+  "exports": {
+    ".": "./dist/index.js",
+    "./vitest": "./dist/vitest.js",
+    "./jest": "./dist/jest.js"
+  },
+  "bin": {
+    "specguard-lint": "./dist/bin/specguard-lint.js",
+    "specguard-ingest": "./dist/bin/specguard-ingest.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "jest": ">=29",
+    "vitest": ">=2"
+  },
+  "peerDependenciesMeta": {
+    "jest": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
+  }
+}
