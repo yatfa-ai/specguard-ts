@@ -53,5 +53,10 @@ jobs:
             echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
           } >> "$GITHUB_ENV"
 
+      # Direct node invocation with the reporter flags BEFORE the target: on Node 20 (this
+      # workflow's floor) anything after the first positional is taken as another test file, so
+      # flags appended to `npm test --` would die as "Could not find '--test-reporter=spec'".
       - name: Run the suite
-        run: npm test -- $SPECGUARD_REPORTER_ARGS
+        run: |
+          npm run pretest
+          node --test $SPECGUARD_REPORTER_ARGS ".test-build/test/"
