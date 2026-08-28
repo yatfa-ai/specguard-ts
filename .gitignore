@@ -6,3 +6,6 @@ coverage/
 # The reporter's default sink (log/test_results.jsonl). Telemetry about a local
 # run is never a repository artifact — see README.md, "Shipping the run".
 /log/
+
+# Compiled test output (npm test builds to .test-build)
+.test-build/
