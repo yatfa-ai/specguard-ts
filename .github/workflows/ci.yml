@@ -1,0 +1,57 @@
+# CI for the SpecGuard TypeScript client: typecheck, build, suite — and the suite reports itself
+# through the very reporter this repository ships, from its own freshly built dist/. A client that
+# does not run behind its own telemetry cannot notice when its reporter breaks: the suite would
+# stay green while every consumer's run silently stopped being delivered.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    env:
+      SPECGUARD_ENDPOINT: https://specguard.yatfa.com
+      # Repository-scoped ingest key for yatfa-ai/specguard-ts. Absent on fork pull requests —
+      # the telemetry step below is conditional on it.
+      SPECGUARD_API_KEY: ${{ secrets.SPECGUARD_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The suite reports through ./dist/node-test/reporter.js, which nothing else in this
+      # workflow builds (pretest compiles only the tests to .test-build), so the explicit build
+      # step is load-bearing for the telemetry below.
+      - name: Build
+        run: npm run build
+
+      # The reporter is additive and never fails the run. With no key (a fork pull request) the
+      # flags are absent and the suite runs on Node's default reporter alone. Composing reporters
+      # requires a --test-reporter-destination per --test-reporter whenever more than one is given
+      # (enforced from Node 23; the pairing itself is valid on every supported version).
+      - name: Enable SpecGuard telemetry when a key is configured
+        if: env.SPECGUARD_API_KEY != ''
+        run: |
+          {
+            echo "SPECGUARD_REPORTER_ARGS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=./dist/node-test/reporter.js --test-reporter-destination=stdout"
+            echo "SPECGUARD_COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}"
+            echo "SPECGUARD_BRANCH=${{ github.head_ref || github.ref_name }}"
+            echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the suite
+        run: npm test -- $SPECGUARD_REPORTER_ARGS
