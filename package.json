@@ -16,14 +16,10 @@
   "engines": {
     "node": ">=20"
   },
-  "//": "Slice 1 ships the runner-agnostic core and the node:test adapter (`./node-test`). The Vitest and Jest adapters (and the `specguard-lint` / `specguard-ingest` bins below) arrive with later slices; nothing is declared as an export that does not exist.",
+  "//": "Slice 1 ships the runner-agnostic core and the node:test adapter (`./node-test`). The Vitest and Jest adapters, and the `specguard-lint` / `specguard-ingest` bins, arrive with later slices; nothing is declared here that does not exist.",
   "exports": {
     ".": "./dist/index.js",
     "./node-test": "./dist/node-test/reporter.js"
-  },
-  "bin": {
-    "specguard-lint": "./dist/bin/specguard-lint.js",
-    "specguard-ingest": "./dist/bin/specguard-ingest.js"
   },
   "files": [
     "dist"
