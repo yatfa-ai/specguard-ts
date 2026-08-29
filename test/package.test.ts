@@ -13,17 +13,22 @@ test("package.json declares ./node-test and declares no export or peerDependency
     exports: Record<string, string>;
     peerDependencies?: Record<string, string>;
     peerDependenciesMeta?: Record<string, unknown>;
+    bin?: Record<string, string>;
     description: string;
   };
   assert.ok(pkg.exports["."] !== undefined);
   assert.ok(pkg.exports["./node-test"] !== undefined);
   assert.equal(pkg.exports["./vitest"], undefined, "./vitest is not implemented yet (slice 5)");
   assert.equal(pkg.exports["./jest"], undefined, "./jest is not implemented yet (slice 5)");
+  assert.ok(pkg.bin !== undefined && pkg.bin["specguard"] !== undefined,
+    "the specguard bin ships with slice 3 (specguard lint)");
+  assert.equal(pkg.exports["./lint"], "./dist/lint/index.js",
+    "the lint module is exported (slice 3)");
   assert.equal(pkg.peerDependencies, undefined, "no adapter peers exist to depend on");
   assert.equal(pkg.peerDependenciesMeta, undefined);
   assert.ok(!pkg.description.includes("Vitest"), pkg.description);
   assert.ok(!pkg.description.includes("Jest"), pkg.description);
-  assert.ok(!pkg.description.includes("linter"), "the lint command ships with a later slice");
+  assert.ok(pkg.bin["specguard"] === "./dist/cli.js", "bin points at the compiled CLI");
 });
 
 test("the description names the runner this slice actually ships", () => {
