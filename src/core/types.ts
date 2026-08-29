@@ -9,8 +9,13 @@ export interface SpecRow {
   /** 1-based line of the test declaration. Positive integer, required. */
   line_number: number;
   status: "annotated" | "unannotated";
-  /** Must be null when unannotated. */
-  intent: null;
+  /**
+   * Null when unannotated; when annotated, the validator-ratified intent
+   * payload carried verbatim from the binary's finding (slice 4). The client
+   * never validates the object's shape — that verdict belongs to
+   * `validate-intent`.
+   */
+  intent: Record<string, unknown> | null;
   /** The composed describe/context/it name — required when intent is null. */
   name: string;
   /** Seconds, not milliseconds. Non-negative, or null when unmeasured. */

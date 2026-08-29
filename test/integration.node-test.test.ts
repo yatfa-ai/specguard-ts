@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import type { Envelope } from "../src/core/types.js";
@@ -273,6 +273,135 @@ test("no API key: the run is written to the local sink and nothing is sent", asy
     assert.equal(parsed.commit_sha, "deadbeef");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Slice 4: validator-ratified intent on telemetry, end to end.
+
+/** Annotate the real fixture by READING its lines — no restated magic numbers. */
+import { SCHEMA_CONTRACT_DIGEST } from "../src/core/validator.js";
+
+const fixtureLines = readFileSync(join(fixturesDir, "annotated.test.js"), "utf8").split("\n");
+function fixtureLineOf(prefix: string): number {
+  const i = fixtureLines.findIndex((l) => l.startsWith(prefix));
+  if (i < 0) throw new Error(`fixture lost: ${prefix}`);
+  return i + 1;
+}
+
+/**
+ * A stub `validate-intent` v0.1.4-shaped binary: answers the probe flags
+ * with the contract digest, and answers `--source --json` with passing
+ * findings carrying `intent`, keyed at each annotation COMMENT's line.
+ */
+async function intentStubBackend(): Promise<string> {
+  const doc = JSON.stringify({
+    mode: "source",
+    findings: [
+      {
+        file: "fixtures/annotated.test.js",
+        line: fixtureLineOf('// @intent: {"entity":"Cart","action":"apply promo code","behavior":"applies the discount'),
+        kind: "schema",
+        ok: true,
+        errors: [],
+        intent: {
+          entity: "Cart",
+          action: "apply promo code",
+          behavior: "applies the discount when the code is valid",
+          layer: "unit",
+        },
+      },
+      {
+        file: "fixtures/annotated.test.js",
+        line: fixtureLineOf('// @intent: {"entity":"Cart","action":"apply promo code","behavior":"rejects an expired code'),
+        kind: "schema",
+        ok: true,
+        errors: [],
+        intent: {
+          entity: "Cart",
+          action: "apply promo code",
+          behavior: "rejects an expired code with a user-facing error",
+          layer: "unit",
+        },
+      },
+    ],
+    summary: { annotations: 2 },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "specguard-validator-"));
+  const file = join(dir, "validate-intent");
+  writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      "case \"$1\" in",
+      `  --version) printf '%s\\n' 'validate-intent stub (intent) schema sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      `  --schema-source) printf '%s\\n' 'schema <embedded schema> sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      "esac",
+      "if [ \"$1\" = \"--source\" ]; then",
+      `  printf '%s\\n' '${doc.replace(/'/g, `'\\''`)}'`,
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  return file;
+}
+
+test("end to end: annotated suite POSTs rows with status annotated and the intent verbatim", async () => {
+  const stub = await intentStubBackend();
+  const srv = await captureServer();
+  try {
+    const result = await runNodeTest("annotated.test.js", srv.url, {
+      SPECGUARD_VALIDATE_INTENT: stub,
+    });
+    assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 3);
+    const byName = new Map(specs.map((s) => [s.name, s]));
+    const applied = byName.get("applies a valid promo code")!;
+    assert.equal(applied.status, "annotated");
+    assert.deepEqual(applied.intent, {
+      entity: "Cart",
+      action: "apply promo code",
+      behavior: "applies the discount when the code is valid",
+      layer: "unit",
+    });
+    const rejected = byName.get("rejects an expired promo code")!;
+    assert.equal(rejected.status, "annotated");
+    assert.deepEqual(rejected.intent, {
+      entity: "Cart",
+      action: "apply promo code",
+      behavior: "rejects an expired code with a user-facing error",
+      layer: "unit",
+    });
+    const bare = byName.get("has no annotation above it")!;
+    assert.equal(bare.status, "unannotated");
+    assert.equal(bare.intent, null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("never-fail end to end: annotations present but NO binary ⇒ slice-1 rows, exit code untouched", async () => {
+  const srv = await captureServer();
+  try {
+    const result = await runNodeTest("annotated.test.js", srv.url, {
+      SPECGUARD_VALIDATE_INTENT: "/nonexistent/validate-intent",
+    });
+    assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 3);
+    for (const spec of specs) {
+      assert.equal(spec.status, "unannotated");
+      assert.equal(spec.intent, null);
+    }
+    assert.match(result.stderr, /validator backend could not be resolved/);
+    assert.match(result.stderr, /test run is unaffected/);
+  } finally {
     await srv.close();
   }
 });
