@@ -14,3 +14,12 @@ export {
 } from "./core/validator.js";
 export { RunCollector, type TestEventData } from "./node-test/collector.js";
 export { specguardReporter, type ReporterEvent, type ReporterOptions } from "./node-test/reporter.js";
+export {
+  lint,
+  EXIT_OK,
+  EXIT_MALFORMED,
+  EXIT_MISUSE,
+  type LintReport,
+  type LintOptions,
+} from "./lint/lint.js";
+export { renderHuman, renderJson } from "./lint/report.js";

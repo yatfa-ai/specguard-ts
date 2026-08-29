@@ -8,9 +8,9 @@ client: same environment variables, same wire contract — a team running both l
 deployment configures them identically, and the two clients are distinguishable on the platform only by
 `User-Agent` (`specguard-ts/<version>`).
 
-**This slice ships the reporter only.** The Vitest and Jest adapters, the `specguard-lint` CLI, and the
-`specguard-ingest` replay command come with later slices of the build plan — this README does not describe
-them. The reporter reads **no `@intent:` annotations at all**: every run it ships is a zero-annotation
+**This slice ships the reporter and the `specguard lint` command.** The Vitest and Jest adapters and the
+`specguard-ingest` replay command come with later slices of the build plan. The reporter reads **no
+`@intent:` annotations on the telemetry path**: every run it ships may be a zero-annotation
 run, which is valid by construction and is the platform's primary path.
 
 ---
@@ -266,3 +266,33 @@ House conventions follow [`specguard-mcp`](https://github.com/yatfa-ai/specguard
 `erasableSyntaxOnly` on, `node --test`, Node >= 20. Fixtures under `fixtures/` are run by real child
 `node --test` processes from the integration tests — their line numbers are load-bearing, and the tests
 name them.
+
+---
+
+## `specguard lint`
+
+Finds `@intent:` annotations in your `.ts/.tsx/.js/.jsx/.mjs/.cjs` sources and validates them
+through the same Go `validate-intent` binary every other stack shares. The client never parses an
+annotation payload itself — Node's `JSON.parse` accepts inputs the OpenTestIntent protocol rejects,
+so extraction and validation both belong to the binary, invoked as `validate-intent --source --json
+<files>`.
+
+```bash
+specguard lint            # walk the current directory
+specguard lint src/a.ts   # check named files
+specguard lint --json     # machine-readable report on stdout
+```
+
+Point the client at a binary with `SPECGUARD_VALIDATE_INTENT=/path/to/validate-intent` (a path, not
+a command name; see slice 2). Without a resolvable binary the command still works for repositories
+that have nothing to check:
+
+| Exit | Meaning |
+|---|---|
+| 0 | every annotation checked was valid — including "there were none" (a repo with zero annotations and no binary is still 0) |
+| 1 | at least one annotation is malformed |
+| 2 | the linter could not do its job — misuse, a broken override, an unresolvable binary when annotations exist, unreadable files, or a backend failure |
+
+An exit-2 run writes its reason to stderr and emits **no report document** — "could not check" is
+never dressed as an empty clean-looking report. `--json` replaces the stdout report only; the exit
+code and stderr are identical on both paths.
