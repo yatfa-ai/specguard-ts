@@ -134,6 +134,34 @@ matters more in TypeScript than it did in Ruby: a shard index composed in code i
 shard fail to replace itself. **Both are stringified at the edge**, in the environment reader and again in
 the envelope builder.
 
+## The `validate-intent` binary
+
+Later slices of this client (annotation lint, intent-on-telemetry) shell out to a `validate-intent`
+binary from [open-test-intent](https://github.com/yatfa-ai/open-test-intent). That resolution layer
+already exists and never throws; importing this package stays safe on any platform, with or without a
+binary, and the telemetry reporter is unaffected by every unavailable state.
+
+A binary is resolved in a fixed precedence, mirroring the Ruby client's documented precedence:
+
+1. **`SPECGUARD_VALIDATE_INTENT`** names a binary — an absolute or relative **path**, never a bare
+   command name (which binary validated a CI job should not depend on what else happens to be on
+   `PATH`). **Blank counts as unset**: `SPECGUARD_VALIDATE_INTENT=` in a CI environment file is
+   somebody asking for the default resolution, not for a binary named `""`.
+2. **An npm-distributed prebuilt**, an optional dependency matched to your platform by `os`/`cpu`.
+   Nothing is published yet, so today this step resolves nothing and the answer is (3).
+3. **`unavailable`** — a typed state with a machine-readable code (`no-binary`, `override-missing`,
+   `override-not-executable`, `override-not-a-path`, `not-executable`,
+   `schema-contract-mismatch`), never a throw. A platform with no prebuilt binary degrades; it does
+   not break.
+
+On every successful resolution the binary's identity is checked before it is used: it is probed with
+`--version` and `--schema-source`, and the digest of the schema its runs would actually **enforce**
+(a `schemas/open-test-intent.v1.json` beside the executable takes precedence over the compiled-in
+copy) is compared against the schema contract this client targets. A binary enforcing a different
+schema is refused with a reason distinct from "missing" — a wrong-contract binary is worse than no
+binary. A binary predating `--schema-source` falls back to the digest carried in its `--version`
+line.
+
 A shard must be able to **replace** its own earlier numbers rather than add to them, which means naming
 itself — press "re-run failed jobs" and only the failed shards run again, inside the same `ci_run_id`.
 Leaving `shard_id` unset is not an error and does not lose the slice; what it cannot do is be recognised on
