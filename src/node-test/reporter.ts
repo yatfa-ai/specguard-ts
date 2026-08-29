@@ -1,5 +1,6 @@
 import { RunCollector } from "./collector.js";
 import type { TestEventData } from "./collector.js";
+import { annotateRows } from "./annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
 import { readRunnerEnv, type RunnerEnv } from "../core/env.js";
 import { deliver, type TransportDeps } from "../core/transport.js";
@@ -86,7 +87,12 @@ async function finish(
     // A run that reported zero tests has nothing to say — no POST, no file.
     if (rows.length === 0) return;
 
-    const envelope = buildEnvelope([...rows], env, collector.durationSeconds());
+    // Slice 4: attempt the annotation pass. It never throws and never
+    // changes the exit code — on any failure the slice-1 rows ship as-is
+    // (the pass itself emits at most one warning line).
+    const annotated = annotateRows(rows, { repoRoot: options.repoRoot ?? process.cwd() });
+
+    const envelope = buildEnvelope(annotated.rows, env, collector.durationSeconds());
     if (envelope === null) {
       process.stderr.write(
         "SpecGuard: no commit sha could be resolved (set SPECGUARD_COMMIT_SHA); telemetry not sent. The test run is unaffected.\n",

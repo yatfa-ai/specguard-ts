@@ -233,3 +233,27 @@ test("a document whose annotations count disagrees with its findings is exit 2",
   assert.equal(report.exitCode, EXIT_MISUSE);
   assert.match(report.stderr.join("\n"), /reported 5 annotation/);
 });
+
+test("backend passthrough: a finding's `intent` object is carried verbatim, absent reads as null", () => {
+  const f = makeRepo({ "a.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});" });
+  const intentPayload = {
+    entity: "Order",
+    action: "checkout",
+    behavior: "returns 402 payment required on expired card",
+    layer: "request",
+    extra: { nested: [1, 2, { deep: true }] },
+  };
+  const withIntent = stubBackend(
+    [
+      { file: "a.test.ts", line: 1, kind: "schema", ok: true, errors: [], intent: intentPayload },
+      { file: "a.test.ts", line: 5, kind: "schema", ok: true, errors: [] },
+      { file: "a.test.ts", line: 9, kind: "schema", ok: true, errors: [], intent: "not-an-object" },
+    ],
+    3,
+  );
+  const report = inRepo(f, [], withIntent);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(report.findings[0]!.intent, intentPayload);
+  assert.equal(report.findings[1]!.intent, null); // absent (v0.1.3 shape)
+  assert.equal(report.findings[2]!.intent, null); // non-object reads as null, never a refusal
+});

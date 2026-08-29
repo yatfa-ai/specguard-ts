@@ -53,6 +53,14 @@ export interface ValidatorFinding {
   kind: string;
   ok: boolean;
   errors: string[];
+  /**
+   * The validator-ratified intent payload, verbatim as the binary emitted it
+   * (validate-intent v0.1.4+ on passing findings). null when the binary did
+   * not emit one — including every binary predating v0.1.4 (v0.1.3's
+   * silent-drop shape). Passthrough by design: NO client-side JSON-schema
+   * validation, whatever object the binary hands back is carried forward.
+   */
+  intent: Record<string, unknown> | null;
 }
 
 interface ValidatorDocument {
@@ -176,12 +184,20 @@ function parseDocument(binaryPath: string, stdout: string, stderr: string): Vali
       );
     }
     const line = f["line"];
+    const intent = f["intent"];
     return {
       file,
       line: typeof line === "number" && Number.isInteger(line) && line > 0 ? line : null,
       kind,
       ok: f["ok"] === true,
       errors: errors as string[],
+      // Passthrough-shaped: an object comes through verbatim, anything else
+      // (including absent — pre-v0.1.4 binaries) reads as null. Never a
+      // refusal: the payload's validity is the binary's verdict to give.
+      intent:
+        typeof intent === "object" && intent !== null && !Array.isArray(intent)
+          ? (intent as Record<string, unknown>)
+          : null,
     };
   });
 
