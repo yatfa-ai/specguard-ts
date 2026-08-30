@@ -335,8 +335,10 @@ name them.
 The Vitest end-to-end tests (`test/integration.vitest.test.ts`) run real `vitest run` child processes over
 `fixtures/vitest/`, and because Vitest is an optional peer that this repository does not depend on, they
 **self-skip when no Vitest is resolvable** — `npm install && npm test` is green on a machine with no
-Vitest. To exercise them locally: `npm install --no-save vitest` and run `npm test` again (CI does exactly
-this).
+Vitest. To exercise them locally: `npm install --no-save vitest` and run `npm test` again. (CI runs these
+self-skipped: its workflow has no Vitest-install step, so the tests above self-skip there until an
+`npm install --no-save vitest` step is added to `.github/workflows/ci.yml` — pending a push with workflows
+permission; see the slice 5 PR.)
 
 ---
 
