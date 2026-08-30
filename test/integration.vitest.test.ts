@@ -24,7 +24,8 @@ const fixturesDir = join(pkgRoot, "fixtures", "vitest");
  * present, which is the installability guarantee slice 5 exists to prove.
  * These end-to-end tests therefore SELF-SKIP when no Vitest is resolvable
  * (a fresh checkout, a consumer's node:test project) and run for real
- * wherever one is installed (CI installs it --no-save; see .github/workflows).
+ * wherever one is installed (CI runs these self-skipped: the workflow has
+ * no Vitest-install step — see "Development" in the README).
  */
 const vitestBin = resolveVitestBin();
 
