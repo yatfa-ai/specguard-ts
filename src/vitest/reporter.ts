@@ -80,6 +80,7 @@ export class SpecguardVitestReporter {
         apiKey: null,
         timeoutMs: 10_000,
         outputPath: "log/test_results.jsonl",
+        localOutputPath: "log/test_results.local.jsonl",
       };
     }
     this.env = env;

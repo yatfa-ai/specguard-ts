@@ -80,3 +80,22 @@ test("output path defaults to log/test_results.jsonl", () => {
     "/tmp/x.jsonl",
   );
 });
+
+test("local output path defaults to log/test_results.local.jsonl and is overridden independently of the replay queue", () => {
+  // Two sinks, two knobs: the keyless local-development record and the
+  // failed-delivery replay queue are separate files by design, so each has
+  // its own variable and its own default, and neither names the other's.
+  const plain = readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a" }) });
+  assert.equal(plain.outputPath, "log/test_results.jsonl");
+  assert.equal(plain.localOutputPath, "log/test_results.local.jsonl");
+
+  const overridden = readRunnerEnv({
+    env: envWith({
+      SPECGUARD_COMMIT_SHA: "a",
+      SPECGUARD_LOCAL_OUTPUT_PATH: "/tmp/local.jsonl",
+      SPECGUARD_OUTPUT_PATH: "/tmp/queue.jsonl",
+    }),
+  });
+  assert.equal(overridden.localOutputPath, "/tmp/local.jsonl");
+  assert.equal(overridden.outputPath, "/tmp/queue.jsonl");
+});

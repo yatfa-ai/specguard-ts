@@ -16,7 +16,7 @@
   "engines": {
     "node": ">=20"
   },
-  "//": "Slices 1-5 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, and the Vitest adapter (`./vitest`). The Jest adapter and the `specguard-ingest` replay bin arrive with later slices; nothing is declared here that does not exist.",
+  "//": "Slices 1-6 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, the Vitest adapter (`./vitest`), and the `specguard-ingest` replay bin. The Jest adapter arrives with a later slice; nothing is declared here that does not exist.",
   "exports": {
     ".": "./dist/index.js",
     "./node-test": "./dist/node-test/reporter.js",
@@ -32,7 +32,8 @@
     }
   },
   "bin": {
-    "specguard": "./dist/cli.js"
+    "specguard": "./dist/cli.js",
+    "specguard-ingest": "./dist/ingest-cli.js"
   },
   "files": [
     "dist"

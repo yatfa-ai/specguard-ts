@@ -8,8 +8,8 @@ client: same environment variables, same wire contract — a team running both l
 deployment configures them identically, and the two clients are distinguishable on the platform only by
 `User-Agent` (`specguard-ts/<version>`).
 
-**This slice ships the node:test and Vitest reporters and the `specguard lint` command.** The Jest adapter and the
-`specguard-ingest` replay command come with later slices of the build plan. The reporter reads **no
+**This slice ships the node:test and Vitest reporters, the `specguard lint` command, and the `specguard-ingest` replay
+command.** The Jest adapter comes with a later slice of the build plan. The reporter reads **no
 `@intent:` annotations on the telemetry path**: every run it ships may be a zero-annotation
 run, which is valid by construction and is the platform's primary path.
 
@@ -19,9 +19,9 @@ run, which is valid by construction and is the platform's primary path.
 
 Implemented and tested in this repository: a runner-agnostic core (envelope construction, per-example row
 shape, stable id composition, transport with the never-fail guarantee), the `node:test` adapter, the
-Vitest adapter, and the `specguard lint` command, all built on that core — the Vitest adapter reuses it
-without a single core change, which was the architecture's acceptance test. Not yet implemented: the Jest
-adapter, npm publishing.
+Vitest adapter, the `specguard lint` command, and the `specguard-ingest` replay bin with the two-file sink
+split (the local development record and the replay queue), all built on that core. Not yet implemented:
+the Jest adapter, npm publishing.
 
 The wire format below is read from SpecGuard's own `Ingest::Payload` validator and is authoritative.
 
@@ -60,12 +60,15 @@ export SPECGUARD_TIMEOUT=10         # optional; seconds, applied to the whole de
 ```
 
 **The API key is the switch.** With no key nothing is sent anywhere and the run is written to
-`log/test_results.jsonl`, so local development needs no opt-out and a fork with no secret configured
-behaves like a laptop rather than like a broken build.
+`log/test_results.local.jsonl` — the **local development record** — so local development needs no opt-out
+and a fork with no secret configured behaves like a laptop rather than like a broken build. Its name is
+configurable via `SPECGUARD_LOCAL_OUTPUT_PATH`.
 
 **A failed delivery is never silent, and never lost.** If the endpoint refuses the run (a `401` from a
 rotated key, a `400`, a `500`) or cannot be reached at all, the reporter prints **one** line to stderr
-naming the status or the error, and appends the payload to `log/test_results.jsonl`:
+naming the status or the error, and appends the payload to `log/test_results.jsonl` — the **replay
+queue** — so the run can be replayed later with
+[`specguard-ingest`](#replaying-a-saved-run):
 
 ```
 SpecGuard: could not deliver test telemetry (HTTP 401 — the API key was not
@@ -108,6 +111,128 @@ Five things in the raw event stream would silently corrupt the payload, and the 
 One more, discovered while testing: **a test file that contains zero tests emits one synthetic `test:pass`
 for the file itself** (its name is the absolute file path). It is filtered; a zero-test file ships nothing
 and crashes nothing.
+
+## The two sinks, and replaying a saved run — `specguard-ingest`
+
+Two kinds of run end up on disk instead of on the platform, and they mean different things, so they go to
+**two different files**:
+
+| File | Written when | Default name | Override |
+| --- | --- | --- | --- |
+| local development record | no API key is configured (the key is the switch) | `log/test_results.local.jsonl` | `SPECGUARD_LOCAL_OUTPUT_PATH` |
+| the **replay queue** | a delivery was attempted and not accepted | `log/test_results.jsonl` | `SPECGUARD_OUTPUT_PATH` |
+
+The split is the fix, not decoration: **nothing on a written line records which sink it was destined for**,
+so a file that ever mixes the two meanings can never be separated after the fact — no filter, no heuristic.
+The writer keeps them apart precisely so this cannot happen.
+
+> **A `log/test_results.jsonl` written by an earlier version of this package may already mix both
+> meanings** (before slice 6, keyless runs and failed deliveries shared one file). The replay bin will
+> send every line in such a file, and nothing can change that: guessing which lines "were failures" from
+> data that does not say would be confidently wrong about which of your runs reach the platform. **Check
+> the file before you replay one you did not write** — that is what [`--list`](#checking-a-file-before-you-send-it----list)
+> is for. A queue file written entirely by this version or later holds only genuine failed deliveries by
+> construction. If you deliberately want one file for both roles, point both variables at the same path.
+
+### Replaying a saved run
+
+The suite is over by the time you see the `401`, and re-running it to recover the telemetry costs you the
+whole suite again. So the file the reporter wrote *is* the run: each line is byte-for-byte the body the
+endpoint was offered, and `specguard-ingest` is the command that sends it:
+
+```bash
+export SPECGUARD_API_KEY=…            # the key that was rotated, fixed
+specguard-ingest log/test_results.jsonl
+```
+
+```
+line 1: accepted — HTTP 202, test_run_id 41f2c9b8, ci_run_id 17442
+line 2: accepted — HTTP 202, test_run_id 41f2c9b8, ci_run_id 17442
+specguard-ingest: delivered 2 of 2 runs from log/test_results.jsonl
+specguard-ingest: lines 1, 2 carried ci_run_id 17442 and each came back with
+test_run_id 41f2c9b8 — the endpoint folded them onto one run
+```
+
+It reads the same `SPECGUARD_ENDPOINT`, `SPECGUARD_API_KEY` and `SPECGUARD_TIMEOUT` the reporters do, and
+sends each line through the same delivery path — URL join, gzip threshold, headers, timeout — so a replay
+reaches the endpoint exactly as the original delivery would have. Each line is delivered **once**, with no
+retry: the command runs out of band, and re-running it is the retry made by someone who can see why the
+first attempt failed.
+
+Each line is reported by its **line number in the file you gave it**, and the folding observation is
+stated only where it was *observed* — two lines that went out with one `ci_run_id` and came back with one
+`test_run_id`. The tool does not claim to know whether a single line folded onto an existing run or
+created a new one; the platform does not say.
+
+### Checking a file before you send it — `--list`
+
+`--list` prints one row per line — branch, commit_sha, `ci_run_id` or its absence, example count,
+duration; every field already on the line, nothing guessed at — and **delivers nothing**:
+
+```bash
+specguard-ingest --list log/test_results.jsonl
+```
+
+```
+line 1: branch main, commit_sha 0d4a1f2c9b8e7d6a5f4c3b2a1908f7e6d5c4b3a2, ci_run_id 17442, 412 examples, 93.4s
+line 2: branch spike/local, commit_sha 9c2e7a10b4d3, no ci_run_id, 6 examples, 0.4s
+line 3: unparseable — could not parse the line as JSON: unexpected end of input
+specguard-ingest: listed 3 lines from log/test_results.jsonl; nothing was delivered
+```
+
+A line the command cannot parse is listed **as unparseable** rather than quietly dropped from the
+preview. `no ci_run_id` is the one to read for: that line has no identity for SpecGuard to fold a
+redelivery onto, so sending it creates a new run rather than joining an existing one.
+
+**It needs no `SPECGUARD_ENDPOINT` and no `SPECGUARD_API_KEY`** — deliberately. The file most worth
+checking is the one written *because* no API key was set, so requiring a key to look at it would withdraw
+the instrument in exactly the situation that produces the hazard.
+
+### Resuming and selecting lines
+
+A file that was only partly accepted is resumed from the line the report named, rather than blindly
+re-sent — the numbering never shifts:
+
+```bash
+specguard-ingest --from-line 7 log/test_results.jsonl     # a suffix: skip lines 1-6
+specguard-ingest --lines 3,7,12-15 log/test_results.jsonl # an explicit set over the same numbering
+```
+
+- `--from-line N` is a suffix (N ≥ 1); `--lines` takes numbers and ranges — kept as ranges, never
+  expanded — over the file's own numbering. Both compose with `--list`, which then previews exactly the
+  set a delivery would send.
+- **The two flags do not combine** (exit `2`): they answer the same question, and intersecting them would
+  silently drop a number you typed — `--from-line 5 --lines 3,7` would send only line 7 and the 3 would
+  vanish without a word.
+- **Repeating one flag is allowed and last-wins**: `--lines 1,2 --lines 4` sends line 4. A repeat
+  replaces rather than intersects, and it is what lets you override a selector baked into a wrapper
+  script.
+- Every malformed spec is a `2` naming what was wrong — `--lines 0`, `--lines 5-2`, `--lines abc`,
+  `--lines 12-`, an empty spec, an empty entry (`3,,5`) — never a fallback to the whole file, which is
+  the one outcome a selector exists to prevent. Whitespace *between* entries is fine (`3, 7`); inside
+  one it is a typo (`5 - 7` is refused).
+- A selector naming lines past the end of the file is **not** an error: nothing is selected, exit `0`,
+  one stderr warning naming what was held back.
+- Held-back lines are **counted and reported** in the summary, with accurate singular/plural wording
+  ("2 earlier lines skipped by --from-line", "1 line not selected by --lines", "1 blank line skipped") —
+  a summary that quietly narrowed what it was summarising would be worse than no summary.
+- Nothing about a line's **content** is consulted by either flag. The numbers come from you, after
+  reading `--list`; that is what keeps this an explicit selector rather than the heuristic this command
+  refuses to grow.
+
+### The exit codes are the contract
+
+| Code | Meaning |
+| --- | --- |
+| `0` | every line was accepted — including the vacuous empty file (a loud stderr warning, not a code) |
+| `1` | at least one line was **refused by the endpoint** — it read the payload and said no (HTTP `400`, the one response the platform forms an opinion about a payload in) |
+| `2` | this tool could not do its job — bad flags, no endpoint or API key, an unreadable file, an unparseable line, a delivery that never reached the endpoint, or one the endpoint answered without ever reading it (`401`, `404`, `429`, `5xx`: nothing was stored, so none of them is a verdict about your run) |
+
+`2` dominates `1`: a file where line 3 was refused and line 7 never arrived exits `2`, because the second
+fact is the one that leaves work undone — both are printed either way; the exit code chooses what to
+shout, never what to say. With `--list` the only reachable codes are `0` (listed) and `2` (bad flag,
+unreadable file): listing delivers nothing, so it can never carry a verdict about a run. The command
+**never throws** — a load failure or an internal error is a `2` with one stderr line, not a stack trace.
 
 ## The Vitest reporter
 
@@ -311,9 +436,9 @@ Self-hosting needs no code change — point `SPECGUARD_ENDPOINT` at your own dep
 - **No failure messages and no stack traces.** A failing test contributes the string `failed` and nothing else.
 - **No console output.** Nothing your suite printed, and nothing any other reporter wrote, is read or forwarded.
 - **No environment.** A fixed list of variables is read and no others: the ones that fill `commit_sha`,
-  `branch`, `ci_run_id` and `shard_id`, plus four that configure the client itself — `SPECGUARD_ENDPOINT`,
-  `SPECGUARD_OUTPUT_PATH`, `SPECGUARD_TIMEOUT`, and `SPECGUARD_API_KEY`, which leaves the machine only as
-  the bearer token above.
+  `branch`, `ci_run_id` and `shard_id`, plus five that configure the client itself — `SPECGUARD_ENDPOINT`,
+  `SPECGUARD_OUTPUT_PATH`, `SPECGUARD_LOCAL_OUTPUT_PATH`, `SPECGUARD_TIMEOUT`, and `SPECGUARD_API_KEY`,
+  which leaves the machine only as the bearer token above.
 - **Proxy settings are read, and this is the one exception** — they decide only *where* the run goes,
   never what is in it.
 
