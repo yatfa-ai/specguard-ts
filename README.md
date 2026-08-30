@@ -1,14 +1,14 @@
 # specguard-ts
 
-> The TypeScript client for [SpecGuard](https://github.com/yatfa-ai/specguard): a `node:test` reporter
-> that ships test-run telemetry.
+> The TypeScript client for [SpecGuard](https://github.com/yatfa-ai/specguard): `node:test` and Vitest
+> reporters that ship test-run telemetry.
 
 The shape deliberately mirrors [`specguard-rspec`](https://github.com/yatfa-ai/specguard-rspec), the Ruby
 client: same environment variables, same wire contract — a team running both languages against one SpecGuard
 deployment configures them identically, and the two clients are distinguishable on the platform only by
 `User-Agent` (`specguard-ts/<version>`).
 
-**This slice ships the reporter and the `specguard lint` command.** The Vitest and Jest adapters and the
+**This slice ships the node:test and Vitest reporters and the `specguard lint` command.** The Jest adapter and the
 `specguard-ingest` replay command come with later slices of the build plan. The reporter reads **no
 `@intent:` annotations on the telemetry path**: every run it ships may be a zero-annotation
 run, which is valid by construction and is the platform's primary path.
@@ -18,8 +18,10 @@ run, which is valid by construction and is the platform's primary path.
 ## Status
 
 Implemented and tested in this repository: a runner-agnostic core (envelope construction, per-example row
-shape, stable id composition, transport with the never-fail guarantee) and the `node:test` adapter built on
-it. Not yet implemented: annotation reading, the lint command, the Vitest/Jest adapters, npm publishing.
+shape, stable id composition, transport with the never-fail guarantee), the `node:test` adapter, the
+Vitest adapter, and the `specguard lint` command, all built on that core — the Vitest adapter reuses it
+without a single core change, which was the architecture's acceptance test. Not yet implemented: the Jest
+adapter, npm publishing.
 
 The wire format below is read from SpecGuard's own `Ingest::Payload` validator and is authoritative.
 
@@ -32,7 +34,8 @@ npm install --save-dev specguard-ts
 ```
 
 The package is ESM-first, ships its own type declarations, and targets Node 20+. It has no runtime
-dependency on anything — `node:test` is part of Node itself.
+dependency on anything — `node:test` is part of Node itself, and Vitest is an **optional peer**:
+installing this package into a `node:test` project pulls in no Vitest and warns about nothing.
 
 ## The reporter
 
@@ -105,6 +108,68 @@ Five things in the raw event stream would silently corrupt the payload, and the 
 One more, discovered while testing: **a test file that contains zero tests emits one synthetic `test:pass`
 for the file itself** (its name is the absolute file path). It is filtered; a zero-test file ships nothing
 and crashes nothing.
+
+## The Vitest reporter
+
+The same telemetry for [Vitest](https://vitest.dev) ≥ 4.0.0, as a [custom
+reporter](https://vitest.dev/advanced/api/reporters) that reuses the runner-agnostic core unchanged — the
+second adapter the core was built to admit. Configure it beside the default reporter:
+
+```ts
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    reporters: ["default", "specguard-ts/vitest"],
+    includeTaskLocation: true, // without this, Vitest reports no line numbers
+  },
+});
+```
+
+Environment variables, the wire contract, sharding, and the never-fail guarantee are exactly the
+`node:test` reporter's — one team running both runners configures them identically, and rows from the two
+runners land in the same envelope shape with the same stable-id composition.
+
+**`includeTaskLocation: true` is required.** The wire contract needs each row's `line_number`, and Vitest
+populates test locations only when this option is set — a measured fact pinned by test, not a documented
+one assumed. Without it every row is dropped with **one** stderr line naming the setting, nothing POSTs,
+and the run's own results and exit code are untouched. (The dropped rows are counted, not silently lost.)
+
+**Vitest ≥ 4, specifically.** Vitest 4 replaced the reporter API this adapter reads (`onTestRunEnd`; on
+Vitest ≤ 3 that hook does not exist and the old `onFinished` hook fires instead). On an older Vitest the
+reporter is a visible no-op — one stderr line saying telemetry was not sent — rather than a silent one.
+Supporting the pre-4 hook is deliberately not attempted: everything this package claims is measured
+against a real runner, and only Vitest 4 is installed in this repository's test path.
+
+### What the reporter does to Vitest events
+
+The mapping decisions, each measured against a real `vitest run` (and pinned by
+`test/integration.vitest.test.ts`):
+
+1. **`location.line` points at the 1-based `test(` call line** — the same anchor `node:test` reports, so
+   the annotation pass's one-line comment lookback (`ANNOTATION_LOOKBACK_LINES`) applies unchanged. The
+   offset was re-measured on Vitest's coordinates rather than inherited: the comment sits exactly one
+   line above `location.line`, pinned by a fixture test.
+2. **`diagnostic().duration` is milliseconds; the wire field `duration` is seconds** — divided by 1000.
+   Skipped tests carry no diagnostic at all and ship `duration: null`.
+3. **`moduleId` is an absolute path** — relativized against the repo root (the process working directory),
+   exactly as the `node:test` reporter relativizes `file`.
+4. **`fullName` is the composed name** — `"outer suite > inner suite > test"`, module path excluded, the
+   same composition the `node:test` reporter reconstructs from its event stack. Vitest hands it over
+   directly; the wire contract gets the same string either way.
+5. **Both `test.skip` and `test.todo` surface as state `"skipped"`** — shipped with outcome `"pending"`,
+   never silently counted as a pass.
+6. **Suites produce no rows** — only tests do; a failing child is reported once, not again through its
+   parent.
+7. **A never-finished test (state `"pending"`, an interrupted run) is not a result** — its row is dropped
+   and counted rather than shipped with a guessed outcome.
+
+**In watch mode every rerun is a run**: each rerun ships one POST with its own duration, measured from the
+rerun boundary. **A failing suite stays failing**: Vitest awaits the reporter's run-end hook, and a hook
+that throws would surface as a Vitest *Unhandled Error* that can fail an otherwise passing run — which is
+why every step in this reporter is guarded, and why that fact is pinned by test.
+
 
 ## Stable per-example ids
 
@@ -266,6 +331,14 @@ House conventions follow [`specguard-mcp`](https://github.com/yatfa-ai/specguard
 `erasableSyntaxOnly` on, `node --test`, Node >= 20. Fixtures under `fixtures/` are run by real child
 `node --test` processes from the integration tests — their line numbers are load-bearing, and the tests
 name them.
+
+The Vitest end-to-end tests (`test/integration.vitest.test.ts`) run real `vitest run` child processes over
+`fixtures/vitest/`, and because Vitest is an optional peer that this repository does not depend on, they
+**self-skip when no Vitest is resolvable** — `npm install && npm test` is green on a machine with no
+Vitest. To exercise them locally: `npm install --no-save vitest` and run `npm test` again. (CI runs these
+self-skipped: its workflow has no Vitest-install step, so the tests above self-skip there until an
+`npm install --no-save vitest` step is added to `.github/workflows/ci.yml` — pending a push with workflows
+permission; see the slice 5 PR.)
 
 ---
 
