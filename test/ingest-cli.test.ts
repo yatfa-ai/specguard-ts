@@ -178,13 +178,13 @@ test("usage: no endpoint and no API key are separate 2s naming the separate fixe
 test("usage: a missing file and a directory are named differently, both 2s", async () => {
   const missing = await runCli(["/nonexistent/nope.jsonl"], "http://127.0.0.1:1");
   assert.equal(missing.code, 2);
-  assert.match(missing.stderr, /no such file: \/nonexistent\/nope\.jsonl/);
+  assert.match(missing.stderr, /error: no such file: \/nonexistent\/nope\.jsonl/);
 
   const dir = mkdtempSync(join(tmpdir(), "specguard-ingest-dir-"));
   try {
     const isDir = await runCli([dir], "http://127.0.0.1:1");
     assert.equal(isDir.code, 2);
-    assert.match(isDir.stderr, /not a file: /);
+    assert.match(isDir.stderr, /error: not a file: /);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

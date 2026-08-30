@@ -391,16 +391,7 @@ export async function run(
   opts: IngestRunOptions = {},
 ): Promise<number> {
   try {
-    let options: Options | null;
-    try {
-      options = parseOptions(argv);
-    } catch (err) {
-      if (err instanceof UsageError) {
-        stderr.write(`specguard-ingest: error: ${err.message}\n`);
-        return EXIT_MISUSE;
-      }
-      throw err;
-    }
+    const options = parseOptions(argv);
     if (options === null) {
       stdout.write(helpText());
       return EXIT_OK;
@@ -437,9 +428,18 @@ export async function run(
     report(source, results, stdout, stderr);
     return exitCode(results);
   } catch (err) {
-    // The backstop that keeps exit 1 meaning one thing: anything reaching
-    // here is a bug in this tool, not a verdict from the endpoint about
-    // anyone's run, so it is a 2 and it says so in those words.
+    // A UsageError is this tool answering its caller — a bad flag, a
+    // selector that names nothing sensibly, a file that cannot be opened.
+    // It is reported in the same register as the endpoint/key checks above:
+    // an ordinary `error:`, never `internal error:` — a typo'd path is user
+    // input about the run, not a bug in this tool.
+    if (err instanceof UsageError) {
+      stderr.write(`specguard-ingest: error: ${err.message}\n`);
+      return EXIT_MISUSE;
+    }
+    // The backstop that keeps exit 1 meaning one thing: anything else
+    // reaching here is a bug in this tool, not a verdict from the endpoint
+    // about anyone's run, so it is a 2 and it says so in those words.
     const what = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     stderr.write(`specguard-ingest: internal error: ${what}\n`);
     return EXIT_MISUSE;

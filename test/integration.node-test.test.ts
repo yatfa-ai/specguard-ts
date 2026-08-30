@@ -7,7 +7,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import type { Envelope } from "../src/core/types.js";
 
