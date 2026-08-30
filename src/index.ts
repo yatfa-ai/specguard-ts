@@ -15,6 +15,10 @@ export {
 export { RunCollector, type TestEventData } from "./node-test/collector.js";
 export { specguardReporter, type ReporterEvent, type ReporterOptions } from "./node-test/reporter.js";
 export {
+  SpecguardVitestReporter,
+  type VitestReporterOptions,
+} from "./vitest/reporter.js";
+export {
   lint,
   EXIT_OK,
   EXIT_MALFORMED,
