@@ -1,7 +1,7 @@
 {
   "name": "specguard-ts",
   "version": "0.0.0",
-  "description": "The TypeScript client for SpecGuard: node:test and Vitest reporters that ship test-run telemetry.",
+  "description": "The TypeScript client for SpecGuard: node:test, Vitest, and Jest reporters that ship test-run telemetry.",
   "license": "MIT",
   "homepage": "https://github.com/yatfa-ai/specguard-ts",
   "repository": {
@@ -16,18 +16,23 @@
   "engines": {
     "node": ">=20"
   },
-  "//": "Slices 1-6 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, the Vitest adapter (`./vitest`), and the `specguard-ingest` replay bin. The Jest adapter arrives with a later slice; nothing is declared here that does not exist.",
+  "//": "Slices 1-7 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, the Vitest adapter (`./vitest`), the `specguard-ingest` replay bin, and the Jest adapter (`./jest`). Nothing is declared here that does not exist.",
   "exports": {
     ".": "./dist/index.js",
     "./node-test": "./dist/node-test/reporter.js",
     "./vitest": "./dist/vitest/reporter.js",
-    "./lint": "./dist/lint/index.js"
+    "./lint": "./dist/lint/index.js",
+    "./jest": "./dist/jest/reporter.js"
   },
   "peerDependencies": {
-    "vitest": ">=4.0.0"
+    "vitest": ">=4.0.0",
+    "jest": ">=30.0.0"
   },
   "peerDependenciesMeta": {
     "vitest": {
+      "optional": true
+    },
+    "jest": {
       "optional": true
     }
   },

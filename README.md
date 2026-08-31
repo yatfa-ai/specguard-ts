@@ -1,6 +1,6 @@
 # specguard-ts
 
-> The TypeScript client for [SpecGuard](https://github.com/yatfa-ai/specguard): `node:test` and Vitest
+> The TypeScript client for [SpecGuard](https://github.com/yatfa-ai/specguard): `node:test`, Vitest, and Jest
 > reporters that ship test-run telemetry.
 
 The shape deliberately mirrors [`specguard-rspec`](https://github.com/yatfa-ai/specguard-rspec), the Ruby
@@ -8,8 +8,8 @@ client: same environment variables, same wire contract — a team running both l
 deployment configures them identically, and the two clients are distinguishable on the platform only by
 `User-Agent` (`specguard-ts/<version>`).
 
-**This slice ships the node:test and Vitest reporters, the `specguard lint` command, and the `specguard-ingest` replay
-command.** The Jest adapter comes with a later slice of the build plan. The reporter reads **no
+**This slice ships the node:test, Vitest, and Jest reporters, the `specguard lint` command, and the `specguard-ingest` replay
+command.** The reporter reads **no
 `@intent:` annotations on the telemetry path**: every run it ships may be a zero-annotation
 run, which is valid by construction and is the platform's primary path.
 
@@ -19,9 +19,9 @@ run, which is valid by construction and is the platform's primary path.
 
 Implemented and tested in this repository: a runner-agnostic core (envelope construction, per-example row
 shape, stable id composition, transport with the never-fail guarantee), the `node:test` adapter, the
-Vitest adapter, the `specguard lint` command, and the `specguard-ingest` replay bin with the two-file sink
-split (the local development record and the replay queue), all built on that core. Not yet implemented:
-the Jest adapter, npm publishing.
+Vitest adapter, the Jest adapter, the `specguard lint` command, and the `specguard-ingest` replay bin with
+the two-file sink split (the local development record and the replay queue), all built on that core. Not
+yet implemented: npm publishing.
 
 The wire format below is read from SpecGuard's own `Ingest::Payload` validator and is authoritative.
 
@@ -34,8 +34,8 @@ npm install --save-dev specguard-ts
 ```
 
 The package is ESM-first, ships its own type declarations, and targets Node 20+. It has no runtime
-dependency on anything — `node:test` is part of Node itself, and Vitest is an **optional peer**:
-installing this package into a `node:test` project pulls in no Vitest and warns about nothing.
+dependency on anything — `node:test` is part of Node itself, and Vitest and Jest are **optional peers**:
+installing this package into a `node:test` project pulls in neither runner and warns about nothing.
 
 ## The reporter
 
@@ -296,6 +296,70 @@ that throws would surface as a Vitest *Unhandled Error* that can fail an otherwi
 why every step in this reporter is guarded, and why that fact is pinned by test.
 
 
+## The Jest reporter
+
+The same telemetry for [Jest](https://jestjs.io) ≥ 30.0.0, as a [custom
+reporter](https://jestjs.io/docs/configuration#reporters-array) that reuses the runner-agnostic core
+unchanged — the third adapter the core was built to admit. Configure it beside the default reporter:
+
+```js
+// jest.config.mjs
+export default {
+  reporters: ["default", "specguard-ts/jest"],
+  testLocationInResults: true, // without this, Jest reports no line numbers
+};
+```
+
+Environment variables, the wire contract, sharding, and the never-fail guarantee are exactly the
+`node:test` and Vitest reporters' — one team running all three runners configures them identically, and
+rows from every runner land in the same envelope shape with the same stable-id composition.
+
+**`testLocationInResults: true` is required.** The wire contract needs each row's `line_number`, and Jest
+populates each test's `location` only when this option is set — a measured fact pinned by test, not a
+documented one assumed. Without it every row is dropped with **one** stderr line naming the setting,
+nothing POSTs, and the run's own results and exit code are untouched. (The dropped rows are counted, not
+silently lost.)
+
+**Jest ≥ 30, specifically.** The facts this adapter rests on were measured against a real Jest 30 child
+process, and the reporter's constructor reads Jest 30's three-argument shape
+(`(globalConfig, options, docs)` — the adapter's options are the *second* argument; Vitest hands one
+options object, and neither shape was assumed). Older Jests are untested, and the peer range says so.
+
+### What the reporter does to Jest events
+
+The mapping decisions, each measured against a real `jest` run (and pinned by
+`test/integration.jest.test.ts`):
+
+1. **`location.line` points at the 1-based `it(` call line** — the same anchor `node:test` and Vitest
+   report, so the annotation pass's one-line comment lookback (`ANNOTATION_LOOKBACK_LINES`) applies
+   unchanged. The offset was re-measured on Jest's coordinates rather than inherited: the comment sits
+   exactly one line above `location.line`, pinned by a fixture test.
+2. **`fullName` is never read.** Jest composes it by joining ancestry with a *single space*
+   (`"outer suite inner suite test"`), a separator no other adapter produces — so the composed name is
+   recomposed from `ancestorTitles` + `title` with the `" > "` join the other two adapters emit, and
+   cross-runner row names stay one contract.
+3. **Per-test `duration` is milliseconds and exists on Jest 30** (Jest's ancestors reported durations
+   only at suite level); the wire field `duration` is seconds — divided by 1000. Skip-family tests carry
+   `duration: null`, and the client never fabricates one.
+4. **`it.skip` surfaces as status `"pending"` and `it.todo` as `"todo"`** — the whole skip family
+   (`pending`, `todo`, `skipped`, `disabled`) ships with outcome `"pending"`, never silently counted as a
+   pass. `it.concurrent` surfaces as an ordinary result.
+5. **The suite's `testFilePath` is an absolute path** — relativized against the repo root (the process
+   working directory), exactly as the other two reporters relativize their file fields.
+6. **Suites produce no rows** — only tests do; a failing child is reported once, not again through its
+   parent.
+7. **An unrecognized status is not a result** — its row is dropped and counted rather than shipped with a
+   guessed outcome.
+
+**In watch mode every rerun is a run**: `onRunStart` re-arms the run clock, and each rerun ships one POST
+with its own duration. **A failing suite stays failing — and a passing one must stay passing**: Jest
+awaits an async `onRunComplete`, and a hook that throws surfaces as the CLI error and fails an otherwise
+passing run (measured: exit 1), which is why every step in this reporter is guarded, and why that fact is
+pinned by test. Jest's own default reporter writes everything to **stderr** (measured: stdout is empty),
+so this adapter's footprint — the `SpecGuard:` lines — sits beside Jest's output on the same stream, and
+a run with the reporter is byte-identical to one without it modulo timings and those lines.
+
+
 ## Stable per-example ids
 
 `id` is the upsert key: SpecGuard writes one observation row per `(test_run_id, example_id)` and a repeated
@@ -464,6 +528,12 @@ Vitest. To exercise them locally: `npm install --no-save vitest` and run `npm te
 self-skipped: its workflow has no Vitest-install step, so the tests above self-skip there until an
 `npm install --no-save vitest` step is added to `.github/workflows/ci.yml` — pending a push with workflows
 permission; see the slice 5 PR.)
+
+The Jest end-to-end tests (`test/integration.jest.test.ts`) run real `jest` child processes over
+`fixtures/jest/`, and because Jest is an optional peer that this repository does not depend on, they
+**self-skip when no Jest is resolvable** — `npm install && npm test` stays green on a machine with no
+Jest. To exercise them locally: `npm install --no-save jest` and run `npm test` again. (CI runs these
+self-skipped for the same reason as Vitest's: the workflow has no Jest-install step.)
 
 ---
 
