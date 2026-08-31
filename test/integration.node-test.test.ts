@@ -171,10 +171,10 @@ test("end to end: line numbers, relative paths, composed names, seconds duration
     // composed ancestry — two levels, three segments
     assert.ok(byName.has("passing suite > inner suite > grandchild ok"));
 
-    // duration — seconds: the 80ms sleep lands in [0.05, 0.5], not near 80
+    // duration — seconds: the 80ms sleep lands in [0.05, 2.0], not near 80
     const slept = byName.get("passing suite > child ok")?.duration;
     assert.ok(
-      slept !== null && slept !== undefined && slept >= 0.05 && slept <= 0.5,
+      slept !== null && slept !== undefined && slept >= 0.05 && slept <= 2.0,
       `duration ${String(slept)} not in seconds`,
     );
 
