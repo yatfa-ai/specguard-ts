@@ -21,6 +21,10 @@ import { VALIDATOR_UNAVAILABLE, type ValidatorResolution } from "../core/validat
  *     concatenated in argument order so the caller sees one list;
  *   * the port's own exit contract: 0 everything valid, 1 something invalid,
  *     ANYTHING ELSE means no verdict was produced;
+ *   * a PASSING finding carries `kind: null` — the binary's documented shape
+ *     ("`kind` is null on a passing finding", report.go) — and is accepted as
+ *     such, while a FAILING finding owes a string kind from the binary's
+ *     documented vocabulary (see FAILURE_KINDS);
  *   * `summary.annotations` is cross-checked against the findings — a
  *     truncated report would otherwise look like a SMALLER clean run, the
  *     exact false-green shape nobody notices.
@@ -43,6 +47,21 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** A timeout, so a hung binary is a 2 and not a hung CI job. */
 const RUN_TIMEOUT_MS = 60_000;
 
+/**
+ * The binary's documented FAILURE vocabulary (validate.go: schema, extraction,
+ * parse, read; no-match from the pattern runner). A FAILING finding outside
+ * this set is the port growing words this client has not been taught — an
+ * exit-2 refusal, exactly like the Ruby reference's `failing_result` raising
+ * on an unknown kind. Passing findings are exempt (they carry `kind: null`).
+ */
+const FAILURE_KINDS: ReadonlySet<string> = new Set([
+  "schema",
+  "extraction",
+  "parse",
+  "read",
+  "no-match",
+]);
+
 export class LintBackendError extends Error {}
 
 /** The binary's finding, as this client carries it forward. */
@@ -50,7 +69,16 @@ export interface ValidatorFinding {
   file: string;
   /** 1-based, when the binary reported one; null otherwise. */
   line: number | null;
-  kind: string;
+  /**
+   * WHY a finding failed, from the binary's documented vocabulary — or null
+   * on a PASSING finding. The real binary renders `kind: null` whenever
+   * `Kind` is empty (report.go: "`kind` is null on a passing finding";
+   * `kind` names why a finding FAILED, so a non-null kind on a passing row
+   * would read as a failure a consumer then has to second-guess). A legacy
+   * string kind on a passing finding is tolerated for forward-compat, but
+   * this client never emits one itself.
+   */
+  kind: string | null;
   ok: boolean;
   errors: string[];
   /**
@@ -171,10 +199,27 @@ function parseDocument(binaryPath: string, stdout: string, stderr: string): Vali
         `the validator backend at ${binaryPath} emitted a finding with no \`file\``,
       );
     }
-    const kind = f["kind"];
-    if (typeof kind !== "string") {
+    const ok = f["ok"] === true;
+    // The kind guard is split exactly like the Ruby reference's
+    // passing_result/failing_result. The real binary emits `kind: null` on
+    // every PASSING finding (report.go: "A passing finding carries `kind:
+    // null`, not \"schema\""), so null/absent is the ACCEPTED passing shape —
+    // refusing it is refusing the product's happy path. A string kind is
+    // tolerated on a passing finding for forward-compat. A FAILING finding
+    // still owes a string kind: `kind` is how the failure is named.
+    const rawKind = f["kind"];
+    if (typeof rawKind !== "string" && !(ok && (rawKind === null || rawKind === undefined))) {
       throw new LintBackendError(
         `the validator backend at ${binaryPath} emitted a finding on ${file} with no \`kind\``,
+      );
+    }
+    const kind = (rawKind as string | null | undefined) ?? null;
+    if (!ok && (typeof kind !== "string" || !FAILURE_KINDS.has(kind))) {
+      // An unknown FAILURE kind is a contract violation worth an exit-2
+      // refusal, never a verdict borrowed under a kind nobody was taught —
+      // the same line the Ruby reference's failing_result draws.
+      throw new LintBackendError(
+        `the validator backend at ${binaryPath} emitted the unknown kind ${JSON.stringify(rawKind)} on ${file}`,
       );
     }
     const errors = f["errors"];
@@ -189,7 +234,7 @@ function parseDocument(binaryPath: string, stdout: string, stderr: string): Vali
       file,
       line: typeof line === "number" && Number.isInteger(line) && line > 0 ? line : null,
       kind,
-      ok: f["ok"] === true,
+      ok,
       errors: errors as string[],
       // Passthrough-shaped: an object comes through verbatim, anything else
       // (including absent — pre-v0.1.4 binaries) reads as null. Never a

@@ -88,13 +88,15 @@ const INTENT_REJECT = {
   layer: "unit",
 };
 
-/** Findings keyed exactly as a real binary reports: the COMMENT's line. */
+/** Findings keyed exactly as a real binary reports: the COMMENT's line.
+ * Passing findings carry `kind: null` — the REAL binary's documented shape
+ * (report.go: "`kind` is null on a passing finding"). */
 function passingFindings(): unknown[] {
   return [
     {
       file: "fixtures/annotated.test.js",
       line: L_APPLY_COMMENT,
-      kind: "schema",
+      kind: null,
       ok: true,
       errors: [],
       intent: INTENT_APPLY,
@@ -102,7 +104,7 @@ function passingFindings(): unknown[] {
     {
       file: "fixtures/annotated.test.js",
       line: L_REJECT_COMMENT,
-      kind: "schema",
+      kind: null,
       ok: true,
       errors: [],
       intent: INTENT_REJECT,
@@ -152,6 +154,27 @@ test("GUARD against the v0.1.3 silent-drop shape: the mapping reads the finding'
   });
   assert.equal(out.rows[0]!.status, "annotated");
   assert.equal(out.rows[0]!.intent, null);
+});
+
+test("TOLERANCE (forward-compat): the one legacy string-kind PASSING fixture still annotates", () => {
+  // The real binary emits `kind: null` on passing findings and every fixture
+  // above encodes that shape. A binary that instead names a kind on a PASSING
+  // finding (the pre-fix stubs' skew) is TOLERATED — the same tolerance
+  // family as the v0.1.3 no-intent guard above: an old binary must degrade
+  // telemetry, never break the run. This is the tree's ONLY deliberately
+  // skewed passing fixture.
+  const legacy = passingFindings().map((f) => ({ ...(f as Record<string, unknown>), kind: "schema" }));
+  const binary = stubBackend(legacy, 2);
+  const warnings: string[] = [];
+  const out = annotateRows(rows(), {
+    repoRoot: pkgRoot,
+    env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(warnings, []);
+  assert.equal(out.annotated, 2);
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, INTENT_APPLY);
 });
 
 test("ok:false findings map to NO row — malformed annotations are the lint command's product", () => {

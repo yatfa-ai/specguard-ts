@@ -149,7 +149,7 @@ test("the annotation pass runs through the unchanged shared path", async (t) => 
       {
         file: source,
         line: 1,
-        kind: "schema",
+        kind: null,
         ok: true,
         errors: [],
         intent: { entity: "Cart", action: "apply promo code", behavior: "applies the discount", layer: "unit" },
