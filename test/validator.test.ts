@@ -176,6 +176,7 @@ test("telemetry is unaffected by every unavailable state: the node-test reporter
     env: {
       commitSha: "abc", branch: "main", ciRunId: "1", shardId: "0",
       endpoint: null, apiKey: null, timeoutMs: 100, outputPath: "/dev/null",
+      localOutputPath: "/dev/null",
     },
   })) {
     lines.push(line);

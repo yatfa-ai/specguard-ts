@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import type { Envelope } from "../src/core/types.js";
@@ -257,20 +257,27 @@ test("never-fail end to end: an unreachable endpoint leaves a passing suite's ex
   assert.ok(!/unhandled rejection/i.test(result.stderr));
 });
 
-test("no API key: the run is written to the local sink and nothing is sent", async () => {
+test("no API key: the run is written to the LOCAL sink, the replay queue is not touched, and nothing is sent", async () => {
   const srv = await captureServer();
   const tmp = mkdtempSync(join(tmpdir(), "specguard-ts-"));
   try {
     const result = await runNodeTest("mixed.test.js", srv.url, {
       SPECGUARD_API_KEY: "",
-      SPECGUARD_OUTPUT_PATH: join(tmp, "out.jsonl"),
+      SPECGUARD_LOCAL_OUTPUT_PATH: join(tmp, "local.jsonl"),
+      SPECGUARD_OUTPUT_PATH: join(tmp, "queue.jsonl"),
     });
     assert.equal(srv.captured.length, 0);
-    const written = readFileSync(join(tmp, "out.jsonl"), "utf8").trim().split("\n");
-    assert.equal(written.length, 1);
-    const parsed = JSON.parse(written[0]!) as Envelope;
+    // The local development record holds the run...
+    const local = readFileSync(join(tmp, "local.jsonl"), "utf8").trim().split("\n");
+    assert.equal(local.length, 1);
+    const parsed = JSON.parse(local[0]!) as Envelope;
     assert.equal(parsed.specs.length, 4);
     assert.equal(parsed.commit_sha, "deadbeef");
+    // ...and the replay queue is NOT touched — the two sinks are asserted
+    // separately because a single shared file is exactly the defect this
+    // split exists to prevent.
+    assert.equal(existsSync(join(tmp, "queue.jsonl")), false,
+      "a keyless run must not land in the replay queue");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
     await srv.close();

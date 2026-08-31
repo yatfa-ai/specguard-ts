@@ -1,6 +1,6 @@
 export { buildEnvelope } from "./core/envelope.js";
 export { readRunnerEnv, type RunnerEnv } from "./core/env.js";
-export { deliver, GZIP_THRESHOLD_BYTES, type TransportDeps, type DeliveryResult } from "./core/transport.js";
+export { deliver, deliverRawLine, GZIP_THRESHOLD_BYTES, type TransportDeps, type DeliveryResult, type RawDeliveryDeps, type RawDeliveryResult } from "./core/transport.js";
 export { exampleId } from "./core/id.js";
 export type { Envelope, SpecRow } from "./core/types.js";
 export {

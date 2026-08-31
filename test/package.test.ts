@@ -27,6 +27,8 @@ test("package.json declares ./node-test and ./vitest and no export for an adapte
   assert.equal(pkg.exports["./lint"], "./dist/lint/index.js",
     "the lint module is exported (slice 3)");
   assert.ok(pkg.bin["specguard"] === "./dist/cli.js", "bin points at the compiled CLI");
+  assert.ok(pkg.bin["specguard-ingest"] === "./dist/ingest-cli.js",
+    "the specguard-ingest replay bin ships with slice 6, as its own entry");
 });
 
 test("Vitest is an OPTIONAL peer, never a dependency — installable where no Vitest exists", () => {

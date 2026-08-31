@@ -14,6 +14,7 @@ function env(overrides: Partial<RunnerEnv> = {}): RunnerEnv {
     apiKey: null,
     timeoutMs: 1000,
     outputPath: "log/test_results.jsonl",
+    localOutputPath: "log/test_results.local.jsonl",
     ...overrides,
   };
 }

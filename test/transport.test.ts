@@ -38,7 +38,8 @@ function env(overrides: Partial<RunnerEnv> = {}): RunnerEnv {
     endpoint: "http://127.0.0.1:1", // connection-refused port by default
     apiKey: "sgk_test",
     timeoutMs: 500,
-    outputPath: "/tmp/specguard-ts-test-should-not-be-written.jsonl",
+    outputPath: "/tmp/specguard-ts-test-replay-queue.jsonl",
+    localOutputPath: "/tmp/specguard-ts-test-local-sink.jsonl",
     ...overrides,
   };
 }
@@ -227,7 +228,7 @@ test("a body over the 256 KiB threshold is sent gzipped", async () => {
   }
 });
 
-test("no API key: nothing is sent anywhere, the run goes to the local sink, silently", async () => {
+test("no API key: nothing is sent anywhere, the run goes to the LOCAL sink, silently", async () => {
   const s = sink();
   const result = await deliver(envelope(), env({ apiKey: null }), {
     warn: s.warn,
@@ -236,7 +237,33 @@ test("no API key: nothing is sent anywhere, the run goes to the local sink, sile
   assert.deepEqual(result, { delivered: false, outcome: "skipped" });
   assert.equal(s.warnings.length, 0);
   assert.equal(s.writes.length, 1);
+  // The keyless run is a laptop run, not a failed delivery: it lands in the
+  // local development record, and the replay queue is NOT touched.
+  assert.match(s.writes[0] ?? "", /^\/tmp\/specguard-ts-test-local-sink\.jsonl::/);
   assert.match(s.writes[0] ?? "", /commit_sha/);
+});
+
+test("the two sinks are separate files: a refused delivery lands in the replay queue ONLY", async () => {
+  // The pin behind the split: keyless runs and failed deliveries must never
+  // share a file, because nothing on a written line says which sink it was
+  // destined for and a mixed file can never be separated after the fact.
+  const srv = await startServer((req, res) => {
+    res.statusCode = 401;
+    res.end("unauthorized");
+  });
+  try {
+    const s = sink();
+    const result = await deliver(envelope(), env({ endpoint: srv.url }), {
+      warn: s.warn,
+      appendFileImpl: s.appendFile,
+    });
+    assert.equal(result.outcome, "fell-back");
+    assert.equal(s.writes.length, 1);
+    assert.match(s.writes[0] ?? "", /^\/tmp\/specguard-ts-test-replay-queue\.jsonl::/,
+      "a failed delivery is replay-queue material, never local-sink material");
+  } finally {
+    await srv.close();
+  }
 });
 
 test("a fallback write that itself fails only warns — never throws", async () => {

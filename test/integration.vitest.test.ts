@@ -499,22 +499,25 @@ test("never-fail end to end: a passing suite stays exit 0 with a failing endpoin
   assert.ok(!/unhandled rejection/i.test(result.stderr), result.stderr);
 });
 
-test("no API key: the run is written to the local sink and nothing is sent", async (t) => {
+test("no API key: the run is written to the LOCAL sink, the replay queue is not touched, and nothing is sent", async (t) => {
   if (vitestBin === null) return t.skip("vitest not installed — adapter e2e skipped (optional peer)");
   const srv = await captureServer();
   const tmp = mkdtempSync(join(tmpdir(), "specguard-ts-"));
   try {
     const result = await runVitest("vitest.config.mts", srv.url, {
       SPECGUARD_API_KEY: "",
-      SPECGUARD_OUTPUT_PATH: join(tmp, "out.jsonl"),
+      SPECGUARD_LOCAL_OUTPUT_PATH: join(tmp, "local.jsonl"),
+      SPECGUARD_OUTPUT_PATH: join(tmp, "queue.jsonl"),
     }, "fixtures/vitest/mixed.test.ts");
     assert.equal(result.code, 1, "the suite's own failure, untouched");
     assert.equal(srv.captured.length, 0);
-    const written = readFileSync(join(tmp, "out.jsonl"), "utf8").trim().split("\n");
-    assert.equal(written.length, 1);
-    const parsed = JSON.parse(written[0]!) as Envelope;
+    const local = readFileSync(join(tmp, "local.jsonl"), "utf8").trim().split("\n");
+    assert.equal(local.length, 1);
+    const parsed = JSON.parse(local[0]!) as Envelope;
     assert.equal(parsed.specs.length, 6);
     assert.equal(parsed.commit_sha, "deadbeef");
+    assert.equal(existsSync(join(tmp, "queue.jsonl")), false,
+      "a keyless run must not land in the replay queue");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
     await srv.close();

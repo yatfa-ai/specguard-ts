@@ -11,6 +11,14 @@ export interface RunnerEnv {
   timeoutMs: number;
   /** Where undeliverable runs are appended, one JSON envelope per line. */
   outputPath: string;
+  /**
+   * Where keyless runs are appended — the local development record, kept
+   * deliberately apart from the replay queue (`outputPath`). Two meanings,
+   * two files: nothing on a written line says which sink it was destined
+   * for, so a file that ever mixes them can never be separated after the
+   * fact. Splitting at the writer is the only fix.
+   */
+  localOutputPath: string;
 }
 
 function firstEnv(
@@ -101,5 +109,7 @@ export function readRunnerEnv(
         ? timeoutSeconds * 1000
         : 10_000,
     outputPath: firstEnv(env, ["SPECGUARD_OUTPUT_PATH"]) ?? "log/test_results.jsonl",
+    localOutputPath:
+      firstEnv(env, ["SPECGUARD_LOCAL_OUTPUT_PATH"]) ?? "log/test_results.local.jsonl",
   };
 }

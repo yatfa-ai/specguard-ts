@@ -59,13 +59,18 @@ export async function deliver(
   const json = JSON.stringify(envelope);
 
   // The API key is the switch: with no key (or no endpoint) nothing is sent
-  // anywhere and the run is written to the local sink.
+  // anywhere and the run is written to the LOCAL SINK — the local development
+  // record, not the replay queue. A keyless run (local dev, a fork PR with no
+  // secret) is a laptop run, not a failed delivery, and writing it to the
+  // replay queue would promise recoverability the queue cannot keep: nothing
+  // on the line says which sink it was destined for, so once the two meanings
+  // share a file they can never be separated again.
   if (env.apiKey === null || env.endpoint === null) {
     try {
-      await append(env.outputPath, `${json}\n`);
+      await append(env.localOutputPath, `${json}\n`);
     } catch (err) {
       warn(
-        `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(err)}). The test run is unaffected.`,
+        `SpecGuard: could not write telemetry to ${env.localOutputPath} (${errorMessage(err)}). The test run is unaffected.`,
       );
     }
     return { delivered: false, outcome: "skipped" };
@@ -75,22 +80,7 @@ export async function deliver(
   const fetchImpl = deps.fetchImpl ?? fetch;
 
   try {
-    const byteLength = Buffer.byteLength(json, "utf8");
-    const gzip = byteLength > GZIP_THRESHOLD_BYTES;
-    const body =
-      gzip ? gzipSync(Buffer.from(json, "utf8")) : Buffer.from(json, "utf8");
-
-    const res = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.apiKey}`,
-        "Content-Type": "application/json",
-        ...(gzip ? { "Content-Encoding": "gzip" } : {}),
-        "User-Agent": userAgent(),
-      },
-      body,
-      signal: AbortSignal.timeout(env.timeoutMs),
-    });
+    const res = await postJson(json, url, env, fetchImpl);
 
     // fetch does NOT throw on a 401 or a 500 — this explicit check is the
     // load-bearing line; without it a refused delivery disappears silently.
@@ -136,6 +126,116 @@ async function writeFallback(
     warn(
       `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(err)}). The test run is unaffected.`,
     );
+  }
+}
+
+/**
+ * The one request this package makes, built once: URL join, gzip threshold,
+ * Authorization, Content-Type, User-Agent, and the bounded timeout. `deliver`
+ * and the replay bin's raw seam both go through here so the two paths cannot
+ * drift — a replay must reach the endpoint exactly as the reporter's own
+ * delivery would have.
+ */
+async function postJson(
+  json: string,
+  url: string,
+  env: RunnerEnv,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
+  const byteLength = Buffer.byteLength(json, "utf8");
+  const gzip = byteLength > GZIP_THRESHOLD_BYTES;
+  const body =
+    gzip ? gzipSync(Buffer.from(json, "utf8")) : Buffer.from(json, "utf8");
+
+  return fetchImpl(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.apiKey}`,
+      "Content-Type": "application/json",
+      ...(gzip ? { "Content-Encoding": "gzip" } : {}),
+      "User-Agent": userAgent(),
+    },
+    body,
+    signal: AbortSignal.timeout(env.timeoutMs),
+  });
+}
+
+export interface RawDeliveryDeps {
+  /** Injectable for tests. Defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+export type RawDeliveryResult =
+  /** A 2xx. `testRunId` is the 202 body's run id when one was readable. */
+  | { outcome: "accepted"; status: number; testRunId: string | null }
+  /** fetch resolved a non-2xx — the endpoint answered without storing. */
+  | { outcome: "http-error"; status: number; detail: string }
+  /** The request never got an answer — refused connection, DNS, timeout. */
+  | { outcome: "network-error"; detail: string };
+
+/**
+ * Deliver ONE saved line's exact bytes to `<endpoint>/api/v1/ingest` — the
+ * raw-body seam the `specguard-ingest` replay bin rides.
+ *
+ * Unlike `deliver`, this never writes a fallback file: the line is already
+ * on disk, and a replay that re-appended it on failure would duplicate it
+ * in the queue. Callers own both the file and the reporting.
+ *
+ * `line` is the saved line's own text, and it is posted as-is — never
+ * parsed-then-re-stringified. Node's `JSON.parse` accepts what the protocol
+ * rejects (a lone `\ud800` escape parses, then silently repairs to U+FFFD on
+ * re-encode), so nothing between the file and the wire may go through a
+ * value round-trip that could rewrite it; a valid-UTF-8 line re-encodes to
+ * its own bytes, which is what makes the string seam safe. `env` should
+ * carry a non-null `endpoint` and `apiKey` — callers check before invoking.
+ */
+export async function deliverRawLine(
+  line: string,
+  env: RunnerEnv,
+  deps: RawDeliveryDeps = {},
+): Promise<RawDeliveryResult> {
+  if (env.endpoint === null || env.apiKey === null) {
+    // Callers check before invoking; this guard keeps the never-throw
+    // contract honest for a direct call rather than building a "Bearer null"
+    // request against an "undefined" URL.
+    return { outcome: "network-error", detail: "no endpoint or API key configured" };
+  }
+  const url = `${env.endpoint.replace(/\/+$/, "")}/api/v1/ingest`;
+
+  try {
+    const res = await postJson(line, url, env, deps.fetchImpl ?? fetch);
+
+    if (res.ok) {
+      return {
+        outcome: "accepted",
+        status: res.status,
+        testRunId: await successTestRunId(res),
+      };
+    }
+
+    let detail = "";
+    try {
+      detail = oneLine(await res.text());
+    } catch {
+      detail = "";
+    }
+    return { outcome: "http-error", status: res.status, detail };
+  } catch (err) {
+    return { outcome: "network-error", detail: errorMessage(err) };
+  }
+}
+
+/** The 202 body's `test_run_id`, or null when the body said nothing usable. */
+async function successTestRunId(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = JSON.parse(await res.text());
+    if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+      const id = (body as { test_run_id?: unknown }).test_run_id;
+      return typeof id === "string" && id !== "" ? id : null;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
