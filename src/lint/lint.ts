@@ -61,7 +61,9 @@ export interface LintOptions extends ValidatorDeps {
   json?: boolean;
 }
 
-function aboutFile(kind: string): boolean {
+/** Null-tolerant by design: only FAILING findings carry a kind, and a passing
+ * finding's kind is null (the binary's documented shape — see backend.ts). */
+function aboutFile(kind: string | null): boolean {
   return kind === "read" || kind === "no-match";
 }
 

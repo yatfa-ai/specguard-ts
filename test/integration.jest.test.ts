@@ -369,7 +369,7 @@ async function intentStubBackend(): Promise<string> {
       {
         file: "fixtures/jest/annotated.test.js",
         line: fixtureLineOf("annotated.test.js", '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"applies the discount'),
-        kind: "schema",
+        kind: null,
         ok: true,
         errors: [],
         intent: {
@@ -382,7 +382,7 @@ async function intentStubBackend(): Promise<string> {
       {
         file: "fixtures/jest/annotated.test.js",
         line: fixtureLineOf("annotated.test.js", '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"rejects an expired code'),
-        kind: "schema",
+        kind: null,
         ok: true,
         errors: [],
         intent: {

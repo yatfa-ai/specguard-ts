@@ -322,7 +322,7 @@ async function intentStubBackend(): Promise<string> {
       {
         file: "fixtures/vitest/annotated.test.ts",
         line: fixtureLineOf("annotated.test.ts", '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"applies the discount'),
-        kind: "schema",
+        kind: null,
         ok: true,
         errors: [],
         intent: {
@@ -335,7 +335,7 @@ async function intentStubBackend(): Promise<string> {
       {
         file: "fixtures/vitest/annotated.test.ts",
         line: fixtureLineOf("annotated.test.ts", '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"rejects an expired code'),
-        kind: "schema",
+        kind: null,
         ok: true,
         errors: [],
         intent: {

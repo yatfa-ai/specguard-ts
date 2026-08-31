@@ -107,7 +107,7 @@ test("escapeGlob neutralizes glob metacharacters so a path matches only itself",
 test("clean annotated repo with a working binary exits 0 and reports both forms", () => {
   const f = makeRepo({ "a.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});" });
   const binary = stubBackend(
-    [{ file: "a.test.ts", line: 1, kind: "schema", ok: true, errors: [] }],
+    [{ file: "a.test.ts", line: 1, kind: null, ok: true, errors: [] }],
     1,
   );
   const report = inRepo(f, [], binary);
@@ -120,6 +120,9 @@ test("clean annotated repo with a working binary exits 0 and reports both forms"
   assert.equal(json.mode, "source");
   assert.equal(json.summary.annotations, 1);
   assert.equal(json.findings[0]?.file, "a.test.ts");
+  // Null-throughput: the document mirrors the binary's own finding shape —
+  // a passing finding's kind renders as JSON null, not a string.
+  assert.equal(json.findings[0]?.kind, null);
   const human = renderHuman(report);
   assert.match(human, /checked 1 source file/);
   assert.doesNotMatch(human, /FAIL/);
@@ -226,7 +229,7 @@ test("a binary exiting 3 or emitting garbage is exit 2, not a false verdict", ()
 test("a document whose annotations count disagrees with its findings is exit 2", () => {
   const f = makeRepo({ "a.test.ts": GOOD_ANNOTATION });
   const binary = stubBackend(
-    [{ file: "a.test.ts", line: 1, kind: "schema", ok: true, errors: [] }],
+    [{ file: "a.test.ts", line: 1, kind: null, ok: true, errors: [] }],
     5, // declares 5, emits 1 — the truncation guard
   );
   const report = inRepo(f, [], binary);
@@ -245,9 +248,9 @@ test("backend passthrough: a finding's `intent` object is carried verbatim, abse
   };
   const withIntent = stubBackend(
     [
-      { file: "a.test.ts", line: 1, kind: "schema", ok: true, errors: [], intent: intentPayload },
-      { file: "a.test.ts", line: 5, kind: "schema", ok: true, errors: [] },
-      { file: "a.test.ts", line: 9, kind: "schema", ok: true, errors: [], intent: "not-an-object" },
+      { file: "a.test.ts", line: 1, kind: null, ok: true, errors: [], intent: intentPayload },
+      { file: "a.test.ts", line: 5, kind: null, ok: true, errors: [] },
+      { file: "a.test.ts", line: 9, kind: null, ok: true, errors: [], intent: "not-an-object" },
     ],
     3,
   );
@@ -256,4 +259,71 @@ test("backend passthrough: a finding's `intent` object is carried verbatim, abse
   assert.deepEqual(report.findings[0]!.intent, intentPayload);
   assert.equal(report.findings[1]!.intent, null); // absent (v0.1.3 shape)
   assert.equal(report.findings[2]!.intent, null); // non-object reads as null, never a refusal
+});
+
+test("GUARD: a FAILING finding with a non-string kind is exit 2 — tolerance is for the passing shape ONLY", () => {
+  // The binary emits `kind: null` on PASSING findings; a FAILING finding
+  // still owes its kind name. A stub that fails a site while omitting the
+  // kind is a contract violation: exit 2, never a verdict (malformed, exit
+  // 1) borrowed under a kind nobody can render.
+  const f = makeRepo({ "a.test.ts": BAD_ANNOTATION + "\nit('x', () => {});" });
+  const binary = stubBackend(
+    [{ file: "a.test.ts", line: 1, kind: null, ok: false, errors: ["entity: is missing"] }],
+    1,
+    1,
+  );
+  const report = inRepo(f, [], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  assert.match(report.stderr.join("\n"), /emitted a finding on a\.test\.ts with no `kind`/);
+});
+
+test("GUARD: a FAILING finding with an UNKNOWN string kind is exit 2, exactly as Ruby's failing_result raises", () => {
+  // The binary documents its failure vocabulary (schema/extraction/parse/
+  // read/no-match). A kind outside it is the port growing words this client
+  // has not been taught — refusing keeps the divergence visible.
+  const f = makeRepo({ "a.test.ts": BAD_ANNOTATION + "\nit('x', () => {});" });
+  const binary = stubBackend(
+    [{ file: "a.test.ts", line: 1, kind: "banana", ok: false, errors: ["entity: is missing"] }],
+    1,
+    1,
+  );
+  const report = inRepo(f, [], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  assert.match(report.stderr.join("\n"), /emitted the unknown kind "banana" on a\.test\.ts/);
+});
+
+test("GUARD: a passing finding with a JUNK (non-string, non-null) kind is still exit 2", () => {
+  // Tolerance on the passing shape covers null/absent and (forward-compat) a
+  // string — not a number. Anything else is no shape the binary emits.
+  const f = makeRepo({ "a.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});" });
+  const binary = stubBackend(
+    [{ file: "a.test.ts", line: 1, kind: 42, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, [], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  assert.match(report.stderr.join("\n"), /emitted a finding on a\.test\.ts with no `kind`/);
+});
+
+test("the real binary's kind:null passing shape exits 0 — the shape the old guard refused", () => {
+  // The pinned regression: before the kind:null fix this exact stub (the
+  // real binary's documented passing shape) was an exit-2 refusal, making
+  // exit 0 unreachable with a real binary on any valid annotation.
+  const f = makeRepo({
+    "a.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});",
+    "b.test.ts": GOOD_ANNOTATION + "\nit('y', () => {});",
+  });
+  const binary = stubBackend(
+    [
+      { file: "a.test.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "b.test.ts", line: 1, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const report = inRepo(f, [], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.ok(report.ok);
+  assert.equal(report.summary.annotations, 2);
+  assert.equal(report.summary.malformed, 0);
+  assert.ok(report.findings.every((x) => x.ok && x.kind === null));
 });
