@@ -46,7 +46,7 @@
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "pretest": "tsc --project tsconfig.test.json",
+    "pretest": "npm run build && tsc --project tsconfig.test.json",
     "test": "node --test \".test-build/test/\"",
     "prepare": "npm run build"
   },
