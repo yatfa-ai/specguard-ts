@@ -511,7 +511,7 @@ Self-hosting needs no code change — point `SPECGUARD_ENDPOINT` at your own dep
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # compiles src+test, runs node --test
+npm test            # builds dist/ from src, compiles src+test to .test-build/, runs node --test
 npm run build       # compiles dist/
 ```
 
