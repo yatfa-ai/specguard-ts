@@ -9,6 +9,7 @@ const { join, dirname } = path;
 import { annotateRows, ANNOTATION_LOOKBACK_LINES } from "../src/node-test/annotate.js";
 import type { SpecRow } from "../src/core/types.js";
 import { SCHEMA_CONTRACT_DIGEST, VALIDATE_INTENT_ENV_VAR } from "../src/core/validator.js";
+import { SCAN_MAX_BYTES } from "../src/lint/discover.js";
 
 const GOOD = SCHEMA_CONTRACT_DIGEST;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -261,6 +262,98 @@ test("annotation-free repository needs no binary: rows untouched, no warning", (
   assert.equal(out.annotated, 0);
   assert.ok(!out.degraded);
 });
+
+// ---------------------------------------------------------------------------
+// SPGD-929: the token gate consults `unscannable` — a file the scan could not
+// look at (unreadable, or over SCAN_MAX_BYTES) is "could not look", never
+// "nothing to check", so that arm degrades loudly: degraded:true plus exactly
+// ONE warning naming the file(s), rows untouched. The never-fail guarantee
+// stands: no throw, no exit code, rows byte-identical on every arm below.
+// ---------------------------------------------------------------------------
+
+/** chmod 000 is a genuine unreadable fixture only under a non-root uid. */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+/** A token-bearing line — the unit the oversized fixture is built from. */
+const oversizeLine = `// @intent: ${"x".repeat(64)}\n`; // 77 bytes, carries the token
+
+test(
+  "never-fail: annotated file over SCAN_MAX_BYTES ⇒ degraded, exactly one warning naming it",
+  () => {
+    // The UNCONDITIONAL guard (no privileges needed in any environment, never
+    // skipped): the file carries `@intent:` tokens but exceeds SCAN_MAX_BYTES,
+    // so scanTokens flags it unscannable — the gate must say "could not look",
+    // not launder it into "nothing to check" with degraded:false.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    const big = path.join(root, "big.test.js");
+    fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
+    assert.ok(fs.statSync(big).size > SCAN_MAX_BYTES); // pin the fixture's premise
+    const warnings: string[] = [];
+    const input = [row("big.test.js", 2, "x")];
+    const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
+    assert.equal(out.annotated, 0);
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.match(warnings[0]!, new RegExp(`larger than ${SCAN_MAX_BYTES} bytes`));
+    assert.ok(warnings[0]!.includes(big)); // names the file
+    assert.match(warnings[0]!, /test run is unaffected/);
+    assert.deepEqual(out.rows, input); // rows untouched on the new arm
+  },
+);
+
+test(
+  "never-fail: unreadable annotated file ⇒ degraded, exactly one warning naming it",
+  // ONLY this arm yields under root (root reads through permission bits, so
+  // chmod 000 would not be a real fixture there); the oversized guard above
+  // is unconditional everywhere.
+  { skip: isRoot ? "running as root: chmod 000 is not a real unreadable fixture" : false },
+  () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    const locked = path.join(root, "locked.test.js");
+    fs.writeFileSync(
+      locked,
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    fs.chmodSync(locked, 0o000);
+    const warnings: string[] = [];
+    const input = [row("locked.test.js", 2, "x")];
+    const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
+    assert.equal(out.annotated, 0);
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.ok(warnings[0]!.includes(locked)); // names the file
+    assert.match(warnings[0]!, /test run is unaffected/);
+    assert.deepEqual(out.rows, input);
+  },
+);
+
+test(
+  "tokens exist beside an unscannable file ⇒ the backend degrade stays the only warning",
+  () => {
+    // The no-double-warning property: with tokens on the readable file the
+    // unscannable branch never fires — when tokens exist, the binary reports
+    // its own read failures, and this arm must not stack a second line onto
+    // the backend degrade.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    fs.writeFileSync(
+      path.join(root, "big.test.js"),
+      oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)),
+    );
+    fs.writeFileSync(
+      path.join(root, "annotated.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    const warnings: string[] = [];
+    const input = [row("annotated.test.js", 2, "x")];
+    const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /validator backend could not be resolved/);
+    assert.equal(out.degraded, true);
+    assert.deepEqual(out.rows, input);
+  },
+);
 
 test("a row whose line - lookback lands on a non-annotation line stays unannotated", () => {
   // The bare test's line-1 lookback points at a blank line, not a finding.
