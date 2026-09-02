@@ -3,7 +3,7 @@ import {
   checkWithBackend,
   type ValidatorFinding,
 } from "./backend.js";
-import { LintUsageError, scanTokens, selectFiles } from "./discover.js";
+import { LintUsageError, SCAN_MAX_BYTES, scanTokens, selectFiles } from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 
 /**
@@ -92,6 +92,10 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
 
   const scans = scanTokens(selection.files);
   const tokenCount = scans.reduce((sum, scan) => sum + scan.tokens, 0);
+  // SPGD-926: `scanTokens` launders an unreadable or oversized file into
+  // `tokens: 0`, so the count alone cannot tell "could not look" from
+  // "looked, found nothing" — carry the flag that can.
+  const unscannable = scans.filter((s) => s.unscannable);
 
   if (selection.files.length === 0) {
     // Nothing in scope. Loud on stderr (so "checked nothing" is never
@@ -112,7 +116,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   const resolution = resolveValidator(options);
 
   if (resolution.state === "unavailable") {
-    if (tokenCount === 0) {
+    if (tokenCount === 0 && unscannable.length === 0) {
       // The one deliberate degrade: nothing to validate, so no binary is
       // needed and absence is not failure. Say so — "could not check" and
       // "nothing to check" are different statements and a checker owes both.
@@ -125,6 +129,31 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         findings: [],
         stderr: [
           `specguard lint: warning: no annotations found in ${selection.files.length} file(s); the validator backend was not needed (${resolution.code})`,
+        ],
+      };
+    }
+    if (unscannable.length > 0) {
+      // Files the client itself could not scan, and no binary to report the
+      // read failure either — the client is the only witness left, so "could
+      // not check" must be said here, never laundered into the degrade above
+      // by the `tokens: 0` the swallow sites produced. Findings stay empty:
+      // the client must not manufacture findings only the binary can report
+      // (and cli.ts then suppresses the stdout document entirely).
+      const named = unscannable.map((s) => s.file);
+      return {
+        ok: false,
+        exitCode: EXIT_MISUSE,
+        backend: null,
+        backendNote: `${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
+        summary: {
+          files: selection.files.length,
+          annotations: 0,
+          malformed: 0,
+          unreadable: unscannable.length,
+        },
+        findings: [],
+        stderr: [
+          `specguard lint: error: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
         ],
       };
     }

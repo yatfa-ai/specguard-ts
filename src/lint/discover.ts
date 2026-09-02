@@ -58,6 +58,10 @@ export interface FileScan {
   file: string;
   /** Token occurrences on any line — a gate count, never a verdict. */
   tokens: number;
+  /** True when the file could not be scanned at all (unreadable, or over
+   * SCAN_MAX_BYTES) — a `tokens: 0` on such a file means "could not look",
+   * never "looked and found nothing". */
+  unscannable: boolean;
 }
 
 export class LintUsageError extends Error {}
@@ -116,24 +120,27 @@ export function selectFiles(paths: string[], root = process.cwd()): FileSelectio
 }
 
 /** Byte budget for one file's scan — a source file, not an asset bundle. */
-const SCAN_MAX_BYTES = 4 * 1024 * 1024;
+export const SCAN_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * Count `@intent:` token occurrences per file. Line-granular and
  * string-blind by design (§7 of the protocol notes): the count gates and
  * summarizes; the binary decides what the tokens mean. An unreadable or
- * oversized file counts zero tokens but keeps its place in the list, so the
- * binary still reports the read failure.
+ * oversized file counts zero tokens, keeps its place in the list, and is
+ * flagged `unscannable` — when a binary resolves, IT still reports the read
+ * failure; when none does, that flag is the only witness separating "could
+ * not look at this file" from "nothing to check" (SPGD-926: both used to be
+ * the same `tokens: 0`, and the no-binary degrade trusted it).
  */
 export function scanTokens(files: string[]): FileScan[] {
   return files.map((file) => {
     let text: string;
     try {
       const buf = fs.readFileSync(file);
-      if (buf.byteLength > SCAN_MAX_BYTES) return { file, tokens: 0 };
+      if (buf.byteLength > SCAN_MAX_BYTES) return { file, tokens: 0, unscannable: true };
       text = buf.toString("utf8");
     } catch {
-      return { file, tokens: 0 };
+      return { file, tokens: 0, unscannable: true };
     }
     let tokens = 0;
     let at = text.indexOf(INTENT_TOKEN);
@@ -141,6 +148,6 @@ export function scanTokens(files: string[]): FileScan[] {
       tokens += 1;
       at = text.indexOf(INTENT_TOKEN, at + INTENT_TOKEN.length);
     }
-    return { file, tokens };
+    return { file, tokens, unscannable: false };
   });
 }
