@@ -6,8 +6,9 @@ import path from "node:path";
 
 import { lint, EXIT_OK, EXIT_MALFORMED, EXIT_MISUSE } from "../src/lint/lint.js";
 import { renderJson, renderHuman } from "../src/lint/report.js";
-import { selectFiles, scanTokens, escapeGlob } from "../src/lint/index.js";
+import { selectFiles, scanTokens, escapeGlob, SCAN_MAX_BYTES } from "../src/lint/index.js";
 import { SCHEMA_CONTRACT_DIGEST, VALIDATE_INTENT_ENV_VAR } from "../src/core/validator.js";
+import { run as runCli } from "../src/cli.js";
 
 const GOOD = SCHEMA_CONTRACT_DIGEST;
 
@@ -326,4 +327,103 @@ test("the real binary's kind:null passing shape exits 0 — the shape the old gu
   assert.equal(report.summary.annotations, 2);
   assert.equal(report.summary.malformed, 0);
   assert.ok(report.findings.every((x) => x.ok && x.kind === null));
+});
+
+// --- SPGD-926: an unscannable file must not authorize the no-binary degrade ---
+//
+// `scanTokens` swallows unreadable and over-budget files into `tokens: 0`,
+// which the no-binary degrade used to read as "nothing to check". Both arms
+// below pin the repaired contract: exit 2, `ok: false`, ONE error line naming
+// the file — and, per cli.ts's rule (exit 2 with no findings), NO stdout
+// document at all: a run that could not look must not dress that as structure.
+
+/** Captures everything the CLI writes to one stream (it only ever .write()s). */
+function capture(): { lines: string[]; stream: NodeJS.WriteStream } {
+  const lines: string[] = [];
+  const stream = {
+    write: (chunk: string | Uint8Array): boolean => {
+      lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    },
+  };
+  return { lines, stream: stream as unknown as NodeJS.WriteStream };
+}
+
+/**
+ * Runs the CLI entry point itself (not lint()) inside the fixture, with the
+ * validator override scrubbed from the real environment so the no-binary arm
+ * is what resolves — the CLI reads process.env, so the scrub is the only way
+ * to make that deterministic.
+ */
+function runCliInRepo(
+  fixture: Fixture,
+  argv: string[],
+): { exit: number; stdout: string; stderr: string } {
+  const out = capture();
+  const err = capture();
+  const previousCwd = process.cwd();
+  const previousOverride = process.env[VALIDATE_INTENT_ENV_VAR];
+  delete process.env[VALIDATE_INTENT_ENV_VAR];
+  process.chdir(fixture.root);
+  try {
+    const exit = runCli(argv, out.stream, err.stream);
+    return { exit, stdout: out.lines.join(""), stderr: err.lines.join("") };
+  } finally {
+    process.chdir(previousCwd);
+    if (previousOverride === undefined) delete process.env[VALIDATE_INTENT_ENV_VAR];
+    else process.env[VALIDATE_INTENT_ENV_VAR] = previousOverride;
+  }
+}
+
+test(
+  "UNREADABLE annotated file, NO binary: exit 2 — 'could not look' is not 'nothing to check'",
+  {
+    skip:
+      process.getuid?.() === 0
+        ? "root bypasses file permissions — the chmod 000 fixture would be readable and this arm would pass vacuously"
+        : false,
+  },
+  () => {
+    const f = makeRepo({
+      "guarded.ts": GOOD_ANNOTATION, // carries a token, but chmod 000 makes it unscannable
+      "plain.ts": "const one = 1;\n",
+    });
+    fs.chmodSync(path.join(f.root, "guarded.ts"), 0o000);
+    const report = inRepo(f, [], undefined);
+    assert.equal(report.exitCode, EXIT_MISUSE);
+    assert.ok(!report.ok);
+    const errorLines = report.stderr.filter((l) => l.startsWith("specguard lint: error:"));
+    assert.equal(errorLines.length, 1);
+    assert.match(errorLines[0]!, /guarded\.ts/);
+    // No synthesized findings — the client never manufactures what only the
+    // binary could report; the names live on stderr, which is what makes
+    // cli.ts's rule suppress the stdout document for this run.
+    assert.equal(report.findings.length, 0);
+    const cli = runCliInRepo(f, ["lint", "--json"]);
+    assert.equal(cli.exit, 2);
+    assert.equal(cli.stdout, ""); // not `ok: true`, not an empty document — nothing
+    assert.match(cli.stderr, /specguard lint: error: .*guarded\.ts/);
+  },
+);
+
+test("OVERSIZED (> SCAN_MAX_BYTES) annotated file, NO binary: exit 2 — the unconditional arm", () => {
+  // The oversized swallow needs no privileges to arm, so this arm runs
+  // everywhere (root included): one file over the byte budget, opening with
+  // a valid annotation, and no binary to hand the failure to.
+  const f = makeRepo({});
+  fs.writeFileSync(
+    path.join(f.root, "big.ts"),
+    Buffer.concat([Buffer.from(GOOD_ANNOTATION + "\n"), Buffer.alloc(SCAN_MAX_BYTES + 1, "x")]),
+  );
+  const report = inRepo(f, [], undefined);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  assert.ok(!report.ok);
+  const errorLines = report.stderr.filter((l) => l.startsWith("specguard lint: error:"));
+  assert.equal(errorLines.length, 1);
+  assert.match(errorLines[0]!, /big\.ts/);
+  assert.equal(report.findings.length, 0);
+  const cli = runCliInRepo(f, ["lint", "--json"]);
+  assert.equal(cli.exit, 2);
+  assert.equal(cli.stdout, ""); // cli.ts's rule: exit 2 + no findings ⇒ no document
+  assert.match(cli.stderr, /specguard lint: error: .*big\.ts/);
 });

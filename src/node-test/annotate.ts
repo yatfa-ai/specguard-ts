@@ -77,6 +77,10 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
 
     // The token gate from lint: a repository with no `@intent:` tokens needs
     // no binary, and absence is not failure — slice-1 rows ship untouched.
+    // NOTE (SPGD-926): `scanTokens` now flags unreadable/oversized files as
+    // `unscannable`; this gate deliberately does NOT consult that flag — a
+    // reporter must not fail a test run, and what `degraded` should mean
+    // over unscannable files is that ticket's own open decision.
     const tokenCount = scanTokens(selection.files).reduce((sum, s) => sum + s.tokens, 0);
     if (tokenCount === 0) return { rows: [...rows], annotated: 0, degraded: false };
 

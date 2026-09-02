@@ -15,6 +15,7 @@ export {
   ANNOTATED_EXTENSIONS,
   SKIPPED_DIRECTORIES,
   INTENT_TOKEN,
+  SCAN_MAX_BYTES,
   LintUsageError,
   type FileSelection,
   type FileScan,
