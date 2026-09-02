@@ -263,21 +263,6 @@ test("annotation-free repository needs no binary: rows untouched, no warning", (
   assert.ok(!out.degraded);
 });
 
-test("annotation-free repository needs no binary: rows untouched, no warning", () => {
-  // A repo root with the fixture but the fixture is not scanned here: use a
-  // temp root containing only a token-free test file — the token gate must
-  // return before any binary resolution.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
-  fs.writeFileSync(path.join(root, "bare.test.js"), 'import { test } from "node:test";\ntest("x", () => {});\n');
-  const warnings: string[] = [];
-  const input = [row("bare.test.js", 2, "x")];
-  const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
-  assert.deepEqual(warnings, []);
-  assert.deepEqual(out.rows, input);
-  assert.equal(out.annotated, 0);
-  assert.ok(!out.degraded);
-});
-
 // ---------------------------------------------------------------------------
 // SPGD-929: the token gate consults `unscannable` — a file the scan could not
 // look at (unreadable, or over SCAN_MAX_BYTES) is "could not look", never
