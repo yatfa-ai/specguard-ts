@@ -2,7 +2,7 @@ import { isAbsolute, relative, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { LintBackendError, checkWithBackend, type ValidatorFinding } from "../lint/backend.js";
-import { scanTokens, selectFiles } from "../lint/discover.js";
+import { SCAN_MAX_BYTES, scanTokens, selectFiles } from "../lint/discover.js";
 
 /**
  * Slice 4: carry validator-ratified intent on telemetry.
@@ -77,12 +77,27 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
 
     // The token gate from lint: a repository with no `@intent:` tokens needs
     // no binary, and absence is not failure — slice-1 rows ship untouched.
-    // NOTE (SPGD-926): `scanTokens` now flags unreadable/oversized files as
-    // `unscannable`; this gate deliberately does NOT consult that flag — a
-    // reporter must not fail a test run, and what `degraded` should mean
-    // over unscannable files is that ticket's own open decision.
-    const tokenCount = scanTokens(selection.files).reduce((sum, s) => sum + s.tokens, 0);
-    if (tokenCount === 0) return { rows: [...rows], annotated: 0, degraded: false };
+    // SPGD-929: the gate consults the `unscannable` flag SPGD-926 added —
+    // a `tokens: 0` over an unreadable/oversized file is "could not look",
+    // never "nothing to check", so that arm degrades LOUDLY (one warning).
+    // The pass still never fails a run: no throw, no exit-code change, and
+    // the rows return untouched on every arm.
+    const scans = scanTokens(selection.files);
+    const tokenCount = scans.reduce((sum, scan) => sum + scan.tokens, 0);
+    const unscannable = scans.filter((scan) => scan.unscannable);
+    if (tokenCount === 0 && unscannable.length === 0) {
+      return { rows: [...rows], annotated: 0, degraded: false };
+    }
+    if (tokenCount === 0 && unscannable.length > 0) {
+      // Kept AT the token gate on purpose: when tokens DO exist, the binary
+      // reports its own read failures — and this arm must never stack a
+      // second warning onto the backend degrade below.
+      const named = unscannable.map((scan) => scan.file);
+      warn(
+        `SpecGuard: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}; telemetry ships unannotated. The test run is unaffected.`,
+      );
+      return { rows: [...rows], annotated: 0, degraded: true };
+    }
 
     const resolution = resolveValidator(deps);
     if (resolution.state === "unavailable") {
