@@ -11,7 +11,17 @@ on:
 
 jobs:
   ci:
+    name: Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # The matrix is not decoration. The engines floor is a CONSUMER statement (>=20 — a consumer
+    # only ever runs the compiled dist/, which has no such constraint, the same split specguard-mcp
+    # documents), while this matrix is the DEVELOPMENT floor: every line the project is developed
+    # on gets the full suite, because the runner-specific behaviours this client lives on (reporter
+    # composition, destination pairing, argument parsing) have all moved between minor lines.
+    strategy:
+      fail-fast: false        # a break on one line should not hide the others
+      matrix:
+        node: ['22', '24', '25']
 
     env:
       SPECGUARD_ENDPOINT: https://specguard.yatfa.com
@@ -24,7 +34,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
@@ -50,13 +60,20 @@ jobs:
             echo "SPECGUARD_REPORTER_ARGS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=./dist/node-test/reporter.js --test-reporter-destination=stdout"
             echo "SPECGUARD_COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}"
             echo "SPECGUARD_BRANCH=${{ github.head_ref || github.ref_name }}"
-            echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
+            # The node suffix keeps the matrix legs as distinct runs on the platform rather than
+            # three deliveries folding into one run (specguard-mcp's workflow does the same).
+            echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}-node${{ matrix.node }}"
           } >> "$GITHUB_ENV"
 
-      # Direct node invocation with the reporter flags BEFORE the target: on Node 20 (this
-      # workflow's floor) anything after the first positional is taken as another test file, so
-      # flags appended to `npm test --` would die as "Could not find '--test-reporter=spec'".
+      # Direct node invocation with the reporter flags BEFORE the target, and the target as a
+      # shell-expanded file list rather than a quoted directory: this is the one invocation that
+      # runs unchanged from Node 20 (the engines floor) through 25. A quoted directory argument is
+      # resolved as a module from Node 24.19 and dies with MODULE_NOT_FOUND; a quoted glob needs
+      # Node 22+; and on Node 20 anything after the first positional is taken as another test file,
+      # so flags appended via `npm test --` would die as "Could not find '--test-reporter=spec'".
+      # The shell expands the unquoted glob into that file list, and flags-first keeps every flag
+      # a flag on every line of the matrix.
       - name: Run the suite
         run: |
           npm run pretest
-          node --test $SPECGUARD_REPORTER_ARGS ".test-build/test/"
+          node --test $SPECGUARD_REPORTER_ARGS .test-build/test/*.js
