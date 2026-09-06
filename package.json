@@ -1,6 +1,6 @@
 {
   "name": "@yatfa/specguard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The TypeScript client for SpecGuard: node:test, Vitest, and Jest reporters that ship test-run telemetry.",
   "license": "MIT",
   "homepage": "https://github.com/yatfa-ai/specguard-ts",
