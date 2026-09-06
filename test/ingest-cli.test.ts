@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -735,8 +735,42 @@ test("bin: a module that cannot load is a 2 with one stderr line, never a stack 
       (err: { code: number; stderr: string }) => ({ code: err.code, stderr: err.stderr }),
     );
     assert.equal(result.code, 2);
-    assert.match(result.stderr, /specguard-ingest: error: could not load specguard-ts: /);
+    assert.match(result.stderr, /specguard-ingest: error: could not load @yatfa\/specguard: /);
     assert.ok(!result.stderr.includes("\n    at "), "no stack trace on a load failure");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The installed shape: a bin reached through the symlink npm creates
+
+test("REGRESSION: both bins run through the symlink npm installs them as", async () => {
+  // npm links a bin as `node_modules/.bin/<name> -> ../<pkg>/dist/<file>.js`,
+  // and Node reports the LINK's own path in `process.argv[1]` rather than the
+  // target's. The main-module guard used to match on the filename, so through
+  // an installed bin it read false: the process loaded, ran nothing and exited
+  // 0 — a silent no-op no consumer could diagnose. Every other test here
+  // invokes the file BY PATH, where the old guard was true, which is exactly
+  // why nothing caught it. This one runs the shipped `dist/` files the way an
+  // install does.
+  const pkgRoot = join(here, "..", "..");
+  const dir = mkdtempSync(join(tmpdir(), "specguard-bin-link-"));
+  const cases = [
+    { link: "specguard", target: join(pkgRoot, "dist", "cli.js"), want: /Usage: specguard lint/ },
+    { link: "specguard-ingest", target: join(pkgRoot, "dist", "ingest-cli.js"), want: /no file given — Usage: specguard-ingest/ },
+  ];
+  try {
+    for (const { link, target, want } of cases) {
+      const linkPath = join(dir, link);
+      symlinkSync(target, linkPath);
+      const result = await execFileAsync(process.execPath, [linkPath]).then(
+        (ok: { stdout: string; stderr: string }) => ({ code: 0, output: ok.stdout + ok.stderr }),
+        (err: { code: number; stdout: string; stderr: string }) => ({ code: err.code, output: err.stdout + err.stderr }),
+      );
+      assert.equal(result.code, 2, `${link} through a symlink must not be a silent no-op (exit 0, no output)`);
+      assert.match(result.output, want);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

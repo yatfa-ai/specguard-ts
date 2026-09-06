@@ -37,7 +37,7 @@ export interface VitestReporterOptions {
  *   import { defineConfig } from "vitest/config";
  *   export default defineConfig({
  *     test: {
- *       reporters: ["default", "specguard-ts/vitest"],
+ *       reporters: ["default", "@yatfa/specguard/vitest"],
  *       includeTaskLocation: true, // without this Vitest reports no lines
  *     },
  *   });

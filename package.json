@@ -1,6 +1,6 @@
 {
-  "name": "specguard-ts",
-  "version": "0.0.0",
+  "name": "@yatfa/specguard",
+  "version": "0.1.0",
   "description": "The TypeScript client for SpecGuard: node:test, Vitest, and Jest reporters that ship test-run telemetry.",
   "license": "MIT",
   "homepage": "https://github.com/yatfa-ai/specguard-ts",
@@ -16,7 +16,10 @@
   "engines": {
     "node": ">=20"
   },
-  "//": "Slices 1-7 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, the Vitest adapter (`./vitest`), the `specguard-ingest` replay bin, and the Jest adapter (`./jest`). Nothing is declared here that does not exist.",
+  "//": "Slices 1-7 ship the runner-agnostic core, the node:test adapter (`./node-test`), the lint command, the Vitest adapter (`./vitest`), the `specguard-ingest` replay bin, and the Jest adapter (`./jest`). Nothing is declared here that does not exist. The package is SCOPED but public: npm defaults a scoped publish to `restricted`, so `publishConfig.access` below is what keeps `npm publish` from quietly producing a private package. The repository is still named `specguard-ts` — the bare `specguard` was already taken on npm by an unrelated author, so the scope is what drops the suffix from the installed name. The wire `User-Agent` deliberately stays `specguard-ts/<version>`: it is the diagnostic identity already flowing from CI into the platform, and renaming it would fragment that history for no functional gain.",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": "./dist/index.js",
     "./node-test": "./dist/node-test/reporter.js",
@@ -47,7 +50,7 @@
     "build": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build && tsc --project tsconfig.test.json",
-    "test": "node --test \".test-build/test/\"",
+    "test": "node --test .test-build/test/*.js",
     "prepare": "npm run build"
   },
   "devDependencies": {},

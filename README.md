@@ -1,7 +1,11 @@
-# specguard-ts
+# @yatfa/specguard
 
 > The TypeScript client for [SpecGuard](https://github.com/yatfa-ai/specguard): `node:test`, Vitest, and Jest
 > reporters that ship test-run telemetry.
+
+Published as **`@yatfa/specguard`**; the repository is still named `specguard-ts`, because the bare
+`specguard` on npm belongs to an unrelated package. The scope is what drops the suffix from the installed
+name — nothing else about the client changed with it, the `User-Agent` below included.
 
 The shape deliberately mirrors [`specguard-rspec`](https://github.com/yatfa-ai/specguard-rspec), the Ruby
 client: same environment variables, same wire contract — a team running both languages against one SpecGuard
@@ -20,8 +24,8 @@ run, which is valid by construction and is the platform's primary path.
 Implemented and tested in this repository: a runner-agnostic core (envelope construction, per-example row
 shape, stable id composition, transport with the never-fail guarantee), the `node:test` adapter, the
 Vitest adapter, the Jest adapter, the `specguard lint` command, and the `specguard-ingest` replay bin with
-the two-file sink split (the local development record and the replay queue), all built on that core. Not
-yet implemented: npm publishing.
+the two-file sink split (the local development record and the replay queue), all built on that core.
+Published to npm as `@yatfa/specguard`.
 
 The wire format below is read from SpecGuard's own `Ingest::Payload` validator and is authoritative.
 
@@ -30,7 +34,7 @@ The wire format below is read from SpecGuard's own `Ingest::Payload` validator a
 ## Install
 
 ```bash
-npm install --save-dev specguard-ts
+npm install --save-dev @yatfa/specguard
 ```
 
 The package is ESM-first, ships its own type declarations, and targets Node 20+. It has no runtime
@@ -44,7 +48,7 @@ second `--test-reporter` flag — the default reporter stays, and the two do not
 
 ```bash
 node --test --test-reporter=spec \
-  --test-reporter=./node_modules/specguard-ts/dist/node-test/reporter.js
+  --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js
 ```
 
 (If you run `node --test` with no directory argument it globs `**/*.test.js` for you; the reporter works
@@ -246,7 +250,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    reporters: ["default", "specguard-ts/vitest"],
+    reporters: ["default", "@yatfa/specguard/vitest"],
     includeTaskLocation: true, // without this, Vitest reports no line numbers
   },
 });
@@ -305,7 +309,7 @@ unchanged — the third adapter the core was built to admit. Configure it beside
 ```js
 // jest.config.mjs
 export default {
-  reporters: ["default", "specguard-ts/jest"],
+  reporters: ["default", "@yatfa/specguard/jest"],
   testLocationInResults: true, // without this, Jest reports no line numbers
 };
 ```
@@ -430,7 +434,7 @@ strategy:
   matrix:
     shard: [1, 2, 3, 4]
 steps:
-  - run: node --test --test-reporter=./node_modules/specguard-ts/dist/node-test/reporter.js
+  - run: node --test --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js
     env:
       SPECGUARD_SHARD_ID: ${{ matrix.shard }}
 ```
