@@ -1,0 +1,175 @@
+# Release @yatfa/specguard to npm. Triggered manually from the Actions UI ("Run
+# workflow" button) — no tags, no push triggers. Click → run the suite → bump
+# patch version → publish to npm → publish a GitHub Release.
+#
+# Mirrors specguard-mcp's release workflow (one-click workflow_dispatch, patch
+# bump by script/bump-version.sh, github-actions[bot] commit, assets on the
+# vX.Y.Z tag, suite BEFORE the bump because a published version number is not
+# recoverable), and like it: **there is no npm token here.**
+#
+# Authentication is npm Trusted Publishing (OIDC). GitHub Actions mints a
+# short-lived identity token from the `id-token: write` permission below, and
+# npm trades it for publish rights because the package's Trusted Publisher
+# config names this repository and this workflow filename. Nothing is stored in
+# repo secrets, so nothing can leak from them; classic npm tokens were removed
+# by the registry in December 2025 and granular write tokens expire every 90
+# days, which is the other half of why this is not token-based.
+#
+# Setup is DONE — this section is history, not a checklist:
+#
+#   - npm's Trusted Publisher config lives in a PACKAGE's settings page, and
+#     that page does not exist until the package does. There is no
+#     pending-publisher flow like PyPI's and no org-level equivalent, so OIDC
+#     cannot perform a package's first publish.
+#   - 0.1.0 was therefore published by hand, once, interactively with a 2FA
+#     one-time password. (Unlike specguard-mcp, no bypass-2FA token was minted
+#     for it — a human was at the keyboard, so the OTP prompt was answerable.)
+#   - The Trusted Publisher was then configured against this file
+#     (yatfa-ai/specguard-ts, workflow `release.yml`).
+#
+# So: nothing to configure, and no secret to add. If this workflow ever fails
+# with ENEEDAUTH or a 404 that reads like the package is missing, suspect the
+# Trusted Publisher config (every field is case-sensitive, and npm does not
+# validate it when saved) or an npm too old to speak OIDC — not a missing token.
+#
+# Provenance is attached automatically — on GitHub Actions over OIDC with a
+# public repo and a public package, npm signs the publish without `--provenance`.
+# 0.1.0 is the sole version without an attestation; a local publish cannot
+# produce one, and it cannot be added retroactively. 0.1.0 is also deprecated:
+# its two CLI bins were a silent no-op when installed (the main-module guard
+# compared filenames, and npm links a bin as a symlink Node does not resolve in
+# `process.argv[1]`). The first release cut here is the fix.
+name: Release (Bump Version & Publish to npm)
+
+on:
+  workflow_dispatch:        # one-click from Actions UI; no inputs needed
+
+permissions:
+  contents: write           # bump commit + vX.Y.Z tag + GitHub Release
+  id-token: write           # the whole authentication story — see the header
+
+jobs:
+  release:
+    name: Test, bump, publish
+    runs-on: ubuntu-latest  # self-hosted runners cannot use trusted publishing
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0      # full history for the rebase-and-push, and tags
+                              # so bump-version.sh's tag-reuse check is real
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'          # LTS, and above the 22.14 OIDC floor
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Ensure npm supports trusted publishing
+        # Trusted publishing needs npm >= 11.5.1. Node 24 ships an 11.x that may
+        # predate it, and an npm too old to speak OIDC does not say so — it fails
+        # with a 404 or ENEEDAUTH that reads like a missing package or a missing
+        # login (npm/cli#9088). Upgrading unconditionally is cheaper than
+        # debugging that error later, from the far side of a committed bump.
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Before the bump on purpose: see the header. This is the last point at
+      # which failing is free.
+      #
+      # `npm test` is safe to call on this runner's Node 24 only because the
+      # script passes an UNQUOTED glob (`.test-build/test/*.js`), which the
+      # shell expands to a file list. The quoted-directory form this package
+      # used until 0.1.0 resolves the directory AS A MODULE from Node 24.19
+      # onward and dies with MODULE_NOT_FOUND, and the quoted-glob form needs
+      # Node 22+ — neither works across the 20-to-25 range the suite is run on
+      # (ci.yml pins 20, this pins 24, contributors run whatever they have).
+      # Shell expansion is the one form every version accepts.
+      - name: Run the suite
+        run: npm test
+
+      - name: Verify the tarball packs
+        # There is no credential to check for — OIDC either works or it does
+        # not, and it cannot be probed without publishing. What CAN be caught
+        # before the bump is a tarball that would not build or would ship empty,
+        # so pack it here and show what a consumer would receive.
+        #
+        # `npm pack`, NOT `npm publish --dry-run`: the latter is not offline. It
+        # preflights the registry, and since this step runs before the bump it
+        # would be asking about the version that is already published — so it
+        # fails with "You cannot publish over the previously published versions"
+        # on every release from the second one onward. `npm pack --dry-run`
+        # builds the tarball and lists its contents without contacting npm,
+        # which is the whole of what this step is for.
+        run: npm pack --dry-run
+
+      - name: Configure Git
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version (commit + tag + push)
+        id: bump
+        run: |
+          # `npm ci` and the build/test compile leave artefacts behind; show what
+          # the tree looks like before the script's clean-tree check runs, so a
+          # refusal here is diagnosable from the log rather than only
+          # reproducible by re-running.
+          echo "--- git status ---"
+          git status --porcelain
+          echo "------------------"
+          chmod +x script/bump-version.sh
+          ./script/bump-version.sh
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        # No NODE_AUTH_TOKEN: the OIDC exchange happens inside npm itself.
+        # --access public because @yatfa/specguard is SCOPED: npm defaults a
+        # scoped publish to `restricted`, and a private package here would be
+        # a silent success that no consumer can install. package.json carries
+        # publishConfig.access too — this flag is the belt to that braces.
+        run: npm publish --access public
+
+      - name: Pack the tarball for the GitHub Release
+        id: pack
+        run: echo "tarball=$(npm pack --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.bump.outputs.tag }}" \
+            --title "${{ steps.bump.outputs.tag }}" \
+            --notes "Published to npm as \`@yatfa/specguard ${{ steps.bump.outputs.version }}\`, with build provenance.
+
+          \`\`\`bash
+          npm install --save-dev @yatfa/specguard@${{ steps.bump.outputs.version }}
+          \`\`\`
+
+          Wire the reporter for whichever runner the suite uses:
+
+          \`\`\`bash
+          # node:test
+          node --test --test-reporter=spec --test-reporter-destination=stdout \\
+               --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js \\
+               --test-reporter-destination=stdout
+          \`\`\`
+
+          \`\`\`js
+          // vitest.config.ts — reporters: [\"default\", \"@yatfa/specguard/vitest\"], includeTaskLocation: true
+          // jest.config.mjs  — reporters: [\"default\", \"@yatfa/specguard/jest\"],   testLocationInResults: true
+          \`\`\`
+
+          The TypeScript client for SpecGuard: node:test, Vitest and Jest reporters that ship test-run telemetry, plus \`specguard lint\` and the \`specguard-ingest\` replay bin." \
+            "${{ steps.pack.outputs.tarball }}"

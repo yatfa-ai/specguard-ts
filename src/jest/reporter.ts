@@ -33,7 +33,7 @@ export interface JestReporterOptions {
  *
  *   // jest.config.mjs
  *   export default {
- *     reporters: ["default", "specguard-ts/jest"],
+ *     reporters: ["default", "@yatfa/specguard/jest"],
  *     testLocationInResults: true, // without this Jest reports no lines
  *   };
  *

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Envelope, SpecRow } from "../src/core/types.js";
 import { SCHEMA_CONTRACT_DIGEST } from "../src/core/validator.js";
@@ -323,17 +323,22 @@ test("MEASURED: without testLocationInResults every row is dropped with a warnin
 
 test("MEASURED: the bare specifier through the exports map loads the ESM default export", async (t) => {
   if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
-  // The consumer-facing form `reporters: ["default", "specguard-ts/jest"]`
+  // The consumer-facing form `reporters: ["default", "@yatfa/specguard/jest"]`
   // resolves through package.json's exports map. Pin it by making this
   // repository resolvable under its own name (a symlink in node_modules),
   // exactly how the fact was first measured — never touching a real
-  // install if one exists.
-  const linkPath = join(pkgRoot, "node_modules", "specguard-ts");
-  if (existsSync(linkPath)) return t.skip("node_modules/specguard-ts already exists — not shadowing it");
+  // install if one exists. The name is SCOPED, so the link lives one level
+  // deeper and the `@yatfa` directory has to exist first; it is removed
+  // again only when this test is what created it.
+  const scopeDir = join(pkgRoot, "node_modules", "@yatfa");
+  const linkPath = join(scopeDir, "specguard");
+  if (existsSync(linkPath)) return t.skip("node_modules/@yatfa/specguard already exists — not shadowing it");
+  const scopeDirPreexisted = existsSync(scopeDir);
   const configDir = mkdtempSync(join(tmpdir(), "specguard-jest-bare-"));
   const srv = await captureServer();
   let linked = false;
   try {
+    if (!scopeDirPreexisted) mkdirSync(scopeDir, { recursive: true });
     symlinkSync(pkgRoot, linkPath);
     linked = true;
     const config = join(configDir, "jest.config.mjs");
@@ -341,7 +346,7 @@ test("MEASURED: the bare specifier through the exports map loads the ESM default
       "export default {",
       `  rootDir: ${JSON.stringify(pkgRoot)},`,
       '  testMatch: ["<rootDir>/fixtures/jest/annotated.test.js"],',
-      '  reporters: ["default", "specguard-ts/jest"],',
+      '  reporters: ["default", "@yatfa/specguard/jest"],',
       "  testLocationInResults: true,",
       "};",
       "",
@@ -354,6 +359,7 @@ test("MEASURED: the bare specifier through the exports map loads the ESM default
     await srv.close();
     rmSync(configDir, { recursive: true, force: true });
     if (linked) unlinkSync(linkPath);
+    if (linked && !scopeDirPreexisted) rmSync(scopeDir, { recursive: true, force: true });
   }
 });
 

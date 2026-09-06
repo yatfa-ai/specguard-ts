@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `specguard` — the specguard-ts command line.
+ * `specguard` — the @yatfa/specguard command line.
  *
  * Slice 3 ships `specguard lint`. Usage:
  *
@@ -11,6 +11,8 @@
  * zero annotations), 1 malformed annotations, 2 could not do its job.
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { lint } from "./lint/lint.js";
 import { renderHuman, renderJson } from "./lint/report.js";
 
@@ -77,7 +79,30 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
   return report.exitCode;
 }
 
+/**
+ * Is this module the process entry point? The ESM stand-in for
+ * `require.main === module`, and it MUST compare real paths.
+ *
+ * npm installs a bin as a symlink — `node_modules/.bin/specguard ->
+ * ../@yatfa/specguard/dist/cli.js` — and Node does NOT resolve it for
+ * `process.argv[1]`: the entry point reports the LINK's own path, which ends
+ * in the bin's name and not in this file's name. A guard that compared
+ * filename suffixes therefore read false for every installed consumer, so the
+ * bin loaded, ran nothing and exited 0 — a silent no-op rather than anything
+ * diagnosable, and invisible to a test that invokes the file by path.
+ * `realpathSync` on both sides makes the link and its target the same file.
+ */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
 // Entry point when executed directly (bin). Importing for tests does nothing.
-if (process.argv[1] !== undefined && process.argv[1].endsWith("cli.js")) {
+if (isEntryPoint()) {
   process.exit(run(process.argv.slice(2), process.stdout, process.stderr));
 }

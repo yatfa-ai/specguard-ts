@@ -24,7 +24,7 @@ export interface ReporterOptions {
  *
  * Use it with Node's `--test-reporter` flag, pointing at the installed file:
  *
- *   node --test --test-reporter=spec --test-reporter=./node_modules/specguard-ts/dist/node-test/reporter.js
+ *   node --test --test-reporter=spec --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js
  *
  * MUST be an async generator function, not a factory returning one — Node
  * only hands `source` to an export that is itself an async generator.
