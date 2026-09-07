@@ -330,17 +330,17 @@ test(
 );
 
 test(
-  "tokens exist beside an unscannable file ⇒ the backend degrade stays the only warning",
+  "tokens exist beside an unscannable file ⇒ exactly ONE warning, and it names the unscannable file",
   () => {
-    // The no-double-warning property: with tokens on the readable file the
-    // unscannable branch never fires — when tokens exist, the binary reports
-    // its own read failures, and this arm must not stack a second line onto
-    // the backend degrade.
+    // The no-double-warning property, rewritten by SPGD-971: with tokens on
+    // the readable file the pass reaches the backend-unresolvable arm, and
+    // the ONE line it emits must still name the file the scan could not look
+    // at — the old `could not be scanned`-less line was the defect (the
+    // unscannable file was carried past the token gate and dropped there).
+    // Unconditional: oversized fixture, no binary, no privileges.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
-    fs.writeFileSync(
-      path.join(root, "big.test.js"),
-      oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)),
-    );
+    const big = path.join(root, "big.test.js");
+    fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
     fs.writeFileSync(
       path.join(root, "annotated.test.js"),
       '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
@@ -349,9 +349,98 @@ test(
     const input = [row("annotated.test.js", 2, "x")];
     const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0]!, /validator backend could not be resolved/);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.ok(warnings[0]!.includes(big)); // names the unscannable file
+    assert.match(warnings[0]!, /validator backend could not be resolved/); // backend fact kept on the same line
     assert.equal(out.degraded, true);
     assert.deepEqual(out.rows, input);
+  },
+);
+
+test(
+  "SPGD-971: a kind:read failure beside a passing finding degrades loudly — one warning naming it, mapping unchanged",
+  () => {
+    // The binary DID report the read failure — annotateRows discarded it at
+    // the row-mapping loop's first `continue` (a read finding carries
+    // ok:false) and reported degraded:false with zero warnings. The failure
+    // must be COUNTED before the loop skips it: degraded:true, exactly one
+    // warning naming the file — while the passing finding still annotates
+    // its row exactly as before (only `degraded` and the warning move).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    fs.writeFileSync(
+      path.join(root, "good.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    const binary = stubBackend(
+      [
+        { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
+        {
+          file: "vanish.test.js",
+          line: null,
+          kind: "read",
+          ok: false,
+          errors: ["open vanish.test.js: no such file or directory"],
+          intent: null,
+        },
+      ],
+      1, // summary.annotations: only the read finding is file-shaped, not a site
+    );
+    const warnings: string[] = [];
+    const input = [row("good.test.js", 2, "x"), row("vanish.test.js", 2, "y")];
+    const out = annotateRows(input, {
+      repoRoot: root,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.ok(warnings[0]!.includes("vanish.test.js")); // names the read-failed file
+    assert.match(warnings[0]!, /test run is unaffected/);
+    // The never-fail mapping is untouched: the passing finding annotates,
+    // the read-failed file's row is byte-identical to its input.
+    assert.equal(out.annotated, 1);
+    assert.equal(out.rows[0]!.status, "annotated");
+    assert.deepEqual(out.rows[0]!.intent, INTENT_APPLY);
+    assert.deepEqual(out.rows[1], input[1]);
+  },
+);
+
+test(
+  "SPGD-971: a file both unscannable and read-failed is named exactly ONCE, in one warning",
+  () => {
+    // Criterion: the two sources (discovery's `unscannable`, the binary's
+    // read findings) fold into ONE de-duplicated line — the oversized file
+    // below is unscannable at discovery AND reported kind:read by the stub
+    // backend, so a naive concatenation would name it twice.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    const big = path.join(root, "big.test.js");
+    fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
+    fs.writeFileSync(
+      path.join(root, "good.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    const binary = stubBackend(
+      [
+        { file: big, line: null, kind: "read", ok: false, errors: ["read big.test.js: too large"], intent: null },
+        { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
+      ],
+      1,
+    );
+    const warnings: string[] = [];
+    const input = [row("good.test.js", 2, "x")];
+    const out = annotateRows(input, {
+      repoRoot: root,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.match(warnings[0]!, /1 file\(s\)/); // the union collapsed to one name
+    assert.equal(warnings[0]!.split("big.test.js").length - 1, 1); // named exactly once
+    assert.ok(warnings[0]!.includes(big));
+    assert.equal(out.annotated, 1); // the readable finding still maps
   },
 );
 
