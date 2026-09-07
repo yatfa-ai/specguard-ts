@@ -89,9 +89,11 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       return { rows: [...rows], annotated: 0, degraded: false };
     }
     if (tokenCount === 0 && unscannable.length > 0) {
-      // Kept AT the token gate on purpose: when tokens DO exist, the binary
-      // reports its own read failures — and this arm must never stack a
-      // second warning onto the backend degrade below.
+      // SPGD-929's arm. With zero tokens no binary is ever resolved, so this
+      // one line is the pass's only warning. The tokens-present arm below
+      // degrades on the same unscannable files plus the binary's read
+      // findings, folded into ONE de-duplicated line, so the pass warns at
+      // most once.
       const named = unscannable.map((scan) => scan.file);
       warn(
         `SpecGuard: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}; telemetry ships unannotated. The test run is unaffected.`,
@@ -99,10 +101,51 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       return { rows: [...rows], annotated: 0, degraded: true };
     }
 
+    // SPGD-971: the tokens-present arm carries the same duty SPGD-929 gave
+    // its sibling above — a file this pass could not look at is "could not
+    // look", never "nothing to check". Two sources feed ONE de-duplicated
+    // name list, so a file that is both unscannable and read-failed is named
+    // once and the pass still emits at most one warning line:
+    //   * discovery-side: `unscannable` from scanTokens (unreadable or over
+    //     SCAN_MAX_BYTES), and
+    //   * backend-side: `kind: "read"` findings that the row-mapping loop
+    //     below would otherwise silently skip (a read finding carries
+    //     ok:false, so its first `continue` drops it — the count must be
+    //     taken before that skip; the loop itself is untouched).
+    // `no-match` is deliberately NOT folded in: an unmatched file is not an
+    // unreadable one, whatever lint.ts's aboutFile() lumps together. The
+    // never-fail guarantee is untouched: no throw, no exit-code change, and
+    // the row mapping below is exactly what it was — only `degraded` and the
+    // warning line move.
+    const unscannableNames: string[] = [];
+    const seenFiles = new Set<string>();
+    const rememberUnreadable = (file: string): void => {
+      // Key on the NORMALIZED path, not the raw string: discovery names files
+      // absolutely (path.join(root, …)) while the backend echoes whatever it
+      // was handed, so the same file can arrive under two spellings. Only the
+      // normalized key makes them collapse to one entry.
+      const key = normalizeRepoPath(file, repoRoot);
+      if (seenFiles.has(key)) return;
+      seenFiles.add(key);
+      unscannableNames.push(file);
+    };
+    for (const scan of unscannable) rememberUnreadable(scan.file);
+    // Reads mutable `unscannableNames` — deliberately ORDER-DEPENDENT. The
+    // two early-fail sites below fire before the backend runs, so no read
+    // findings exist yet and the clause correctly carries only discovery-side
+    // names; the final site fires after `readFailed` has been folded in. Do
+    // not reorder those call sites without re-checking each line's claim.
+    // Reuses the existing "could not be scanned" register — the same string
+    // the sibling arm above emits — so this is one warning kind, not a new one.
+    const unreadableClause = (): string =>
+      `${unscannableNames.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${unscannableNames.join(", ")}`;
+
     const resolution = resolveValidator(deps);
     if (resolution.state === "unavailable") {
       warn(
-        `SpecGuard: annotations present but the validator backend could not be resolved (${resolution.code}); telemetry ships unannotated. The test run is unaffected.`,
+        unscannableNames.length === 0
+          ? `SpecGuard: annotations present but the validator backend could not be resolved (${resolution.code}); telemetry ships unannotated. The test run is unaffected.`
+          : `SpecGuard: ${unreadableClause()}; annotations present but the validator backend could not be resolved (${resolution.code}); telemetry ships unannotated. The test run is unaffected.`,
       );
       return { rows: [...rows], annotated: 0, degraded: true };
     }
@@ -113,9 +156,28 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     } catch (error) {
       const message = error instanceof LintBackendError ? error.message : String(error);
       warn(
-        `SpecGuard: the validator backend failed (${message}); telemetry ships unannotated. The test run is unaffected.`,
+        unscannableNames.length === 0
+          ? `SpecGuard: the validator backend failed (${message}); telemetry ships unannotated. The test run is unaffected.`
+          : `SpecGuard: ${unreadableClause()}; the validator backend failed (${message}); telemetry ships unannotated. The test run is unaffected.`,
       );
       return { rows: [...rows], annotated: 0, degraded: true };
+    }
+
+    // Count the binary's read failures BEFORE the row-mapping loop skips
+    // them — the same predicate lint.ts counts as `unreadable`, restricted
+    // to `read`. The two `continue`s below stay exactly as they are; what
+    // changes is that the information is counted above the skip.
+    const readFailed = findings.filter((finding) => finding.kind === "read" && !finding.ok);
+    for (const finding of readFailed) rememberUnreadable(finding.file);
+    if (unscannableNames.length > 0) {
+      // Site-specific tail, like the sibling arms above — but TRUE here,
+      // where it is false for them: the backend succeeded and the mapping
+      // below annotates the rows it could look at (this arm can return
+      // annotated > 0), so this line must NOT claim "telemetry ships
+      // unannotated". What ships unannotated is exactly the named files —
+      // a file this pass could not look at has no passing findings, so
+      // none of its rows can annotate.
+      warn(`SpecGuard: ${unreadableClause()}; those files ship unannotated. The test run is unaffected.`);
     }
 
     // Key by (normalized file, 1-based line). Later findings never overwrite
@@ -140,7 +202,9 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       annotated += 1;
       return { ...row, status: "annotated" as const, intent: byCoordinate.get(key) ?? null };
     });
-    return { rows: out, annotated, degraded: false };
+    // SPGD-971: degraded when this pass could not look at every file it was
+    // given — even on an otherwise clean mapping.
+    return { rows: out, annotated, degraded: unscannableNames.length > 0 };
   } catch {
     // Absolute never-fail backstop: an unexpected throw still ships slice-1
     // rows rather than taking the suite down.
