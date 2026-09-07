@@ -90,13 +90,10 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     }
     if (tokenCount === 0 && unscannable.length > 0) {
       // SPGD-929's arm. With zero tokens no binary is ever resolved, so this
-      // one line is the pass's only warning. SPGD-971 corrected the claim the
-      // comment here used to make ("when tokens DO exist, the binary reports
-      // its own read failures"): false twice over — the tokens-present arm
-      // DISCARDED those read findings before mapping, and with no binary
-      // there was no report at all. That arm now counts the same unscannable
-      // files plus the binary's read findings into ONE de-duplicated line
-      // (see below), so the pass still warns at most once.
+      // one line is the pass's only warning. The tokens-present arm below
+      // degrades on the same unscannable files plus the binary's read
+      // findings, folded into ONE de-duplicated line, so the pass warns at
+      // most once.
       const named = unscannable.map((scan) => scan.file);
       warn(
         `SpecGuard: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}; telemetry ships unannotated. The test run is unaffected.`,
@@ -123,12 +120,21 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     const unscannableNames: string[] = [];
     const seenFiles = new Set<string>();
     const rememberUnreadable = (file: string): void => {
+      // Key on the NORMALIZED path, not the raw string: discovery names files
+      // absolutely (path.join(root, …)) while the backend echoes whatever it
+      // was handed, so the same file can arrive under two spellings. Only the
+      // normalized key makes them collapse to one entry.
       const key = normalizeRepoPath(file, repoRoot);
       if (seenFiles.has(key)) return;
       seenFiles.add(key);
       unscannableNames.push(file);
     };
     for (const scan of unscannable) rememberUnreadable(scan.file);
+    // Reads mutable `unscannableNames` — deliberately ORDER-DEPENDENT. The
+    // two early-fail sites below fire before the backend runs, so no read
+    // findings exist yet and the clause correctly carries only discovery-side
+    // names; the final site fires after `readFailed` has been folded in. Do
+    // not reorder those call sites without re-checking each line's claim.
     // Reuses the existing "could not be scanned" register — the same string
     // the sibling arm above emits — so this is one warning kind, not a new one.
     const unreadableClause = (): string =>
@@ -164,7 +170,14 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     const readFailed = findings.filter((finding) => finding.kind === "read" && !finding.ok);
     for (const finding of readFailed) rememberUnreadable(finding.file);
     if (unscannableNames.length > 0) {
-      warn(`SpecGuard: ${unreadableClause()}; telemetry ships unannotated. The test run is unaffected.`);
+      // Site-specific tail, like the sibling arms above — but TRUE here,
+      // where it is false for them: the backend succeeded and the mapping
+      // below annotates the rows it could look at (this arm can return
+      // annotated > 0), so this line must NOT claim "telemetry ships
+      // unannotated". What ships unannotated is exactly the named files —
+      // a file this pass could not look at has no passing findings, so
+      // none of its rows can annotate.
+      warn(`SpecGuard: ${unreadableClause()}; those files ship unannotated. The test run is unaffected.`);
     }
 
     // Key by (normalized file, 1-based line). Later findings never overwrite

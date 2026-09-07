@@ -397,6 +397,12 @@ test(
     assert.match(warnings[0]!, /could not be scanned/);
     assert.ok(warnings[0]!.includes("vanish.test.js")); // names the read-failed file
     assert.match(warnings[0]!, /test run is unaffected/);
+    // This arm is the one site where the backend succeeded and rows DO
+    // annotate (out.annotated === 1 below) — the warning must therefore NOT
+    // carry the sibling arms' "telemetry ships unannotated" tail, which is
+    // true only where annotated: 0 is returned. Pin both halves of the claim.
+    assert.ok(!warnings[0]!.includes("telemetry ships unannotated"));
+    assert.match(warnings[0]!, /those files ship unannotated/);
     // The never-fail mapping is untouched: the passing finding annotates,
     // the read-failed file's row is byte-identical to its input.
     assert.equal(out.annotated, 1);
@@ -413,6 +419,12 @@ test(
     // read findings) fold into ONE de-duplicated line — the oversized file
     // below is unscannable at discovery AND reported kind:read by the stub
     // backend, so a naive concatenation would name it twice.
+    // MIXED SHAPE, deliberately: discovery names files absolutely
+    // (path.join(root, …)) while a real backend echoes whatever it was
+    // handed — here a relative "big.test.js". Dedup keys on the NORMALIZED
+    // path for exactly this case; keying on the raw string would name the
+    // file twice ("…: /tmp/…/big.test.js, big.test.js") and this example
+    // would catch it via the occurrence count below.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
     const big = path.join(root, "big.test.js");
     fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
@@ -422,7 +434,7 @@ test(
     );
     const binary = stubBackend(
       [
-        { file: big, line: null, kind: "read", ok: false, errors: ["read big.test.js: too large"], intent: null },
+        { file: "big.test.js", line: null, kind: "read", ok: false, errors: ["read big.test.js: too large"], intent: null },
         { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
       ],
       1,
@@ -439,7 +451,10 @@ test(
     assert.match(warnings[0]!, /could not be scanned/);
     assert.match(warnings[0]!, /1 file\(s\)/); // the union collapsed to one name
     assert.equal(warnings[0]!.split("big.test.js").length - 1, 1); // named exactly once
-    assert.ok(warnings[0]!.includes(big));
+    // No assertion on WHICH spelling survives — that is call-order detail
+    // owned by the fold sites (#11 owns the discovery side, the read test
+    // above owns the binary side). This example's contract is exactly-once
+    // under mixed spellings; it must not double as a discovery-fold detector.
     assert.equal(out.annotated, 1); // the readable finding still maps
   },
 );
