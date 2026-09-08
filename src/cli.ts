@@ -4,11 +4,13 @@
  *
  * Slice 3 ships `specguard lint`. Usage:
  *
- *   specguard lint [--json] [files...]
+ *   specguard lint [--json] [--changed[=<base>]] [files...]
  *
  * Without paths, annotated source files (`.ts/.tsx/.js/.jsx/.mjs/.cjs`) are
- * discovered by walking the current directory. Exit codes: 0 clean (including
- * zero annotations), 1 malformed annotations, 2 could not do its job.
+ * discovered by walking the current directory; `--changed` instead selects
+ * them from the git diff against the merge base with the default branch (or
+ * an explicit `<base>`). Exit codes: 0 clean (including zero annotations),
+ * 1 malformed annotations, 2 could not do its job.
  */
 
 import { realpathSync } from "node:fs";
@@ -19,20 +21,29 @@ import { renderHuman, renderJson } from "./lint/report.js";
 interface Options {
   json: boolean;
   help: boolean;
+  changed: boolean;
+  /** The explicit diff base of `--changed=<base>`; null means "derive it".
+   * An explicit EMPTY base stays explicit (and fails loudly at the diff),
+   * never silently re-read as "derive". */
+  base: string | null;
 }
 
 type Parsed = { options: Options; paths: string[] } | { error: string };
 
 function usage(stream: NodeJS.WriteStream): void {
-  stream.write("Usage: specguard lint [--json] [files...]\n");
+  stream.write("Usage: specguard lint [--json] [--changed[=<base>]] [files...]\n");
 }
 
 function parse(argv: string[]): Parsed {
-  const options: Options = { json: false, help: false };
+  const options: Options = { json: false, help: false, changed: false, base: null };
   const paths: string[] = [];
   for (const arg of argv) {
     if (arg === "--json") options.json = true;
-    else if (arg === "--help" || arg === "-h") options.help = true;
+    else if (arg === "--changed") options.changed = true;
+    else if (arg.startsWith("--changed=")) {
+      options.changed = true;
+      options.base = arg.slice("--changed=".length);
+    } else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg.startsWith("--")) return { error: `invalid option: ${arg}` };
     else paths.push(arg);
   }
@@ -65,11 +76,20 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
   }
   if (parsed.options.help) {
     usage(stdout);
+    stdout.write(
+      "\n  --changed[=<base>]  check only files changed against <base> (default: the\n" +
+        "                      merge base with the default branch; never a bare\n" +
+        "                      working-tree-vs-index diff, which is empty in CI)\n",
+    );
     stdout.write("\nExit codes: 0 clean (including zero annotations), 1 malformed annotations, 2 could not lint.\n");
     return 0;
   }
 
-  const report = lint(parsed.paths, { json: parsed.options.json });
+  const report = lint(parsed.paths, {
+    json: parsed.options.json,
+    changed: parsed.options.changed,
+    base: parsed.options.base ?? undefined,
+  });
   for (const line of report.stderr) stderr.write(`${line}\n`);
   if (report.exitCode !== 2 || report.findings.length > 0) {
     // Exit-2-with-no-findings runs emit no document (see report.ts); an

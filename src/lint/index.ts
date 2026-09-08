@@ -16,9 +16,12 @@ export {
   SKIPPED_DIRECTORIES,
   INTENT_TOKEN,
   SCAN_MAX_BYTES,
+  DEFAULT_BRANCH_REFS,
   LintUsageError,
   type FileSelection,
   type FileScan,
+  type ChangedStats,
+  type SelectOptions,
 } from "./discover.js";
 export {
   checkWithBackend,

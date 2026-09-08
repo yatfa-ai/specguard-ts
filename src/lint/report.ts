@@ -15,8 +15,14 @@ function location(f: { file: string; line: number | null }): string {
 /** The human-readable stdout report. */
 export function renderHuman(report: LintReport): string {
   const lines: string[] = [];
+  const selection = report.selection;
+  const changedSince =
+    selection?.mode === "changed" && selection.base !== null
+      ? ` changed since ${selection.base}`
+      : "";
   lines.push(
-    `specguard lint: checked ${report.summary.files} source file${report.summary.files === 1 ? "" : "s"}`,
+    `specguard lint: checked ${report.summary.files} source file${report.summary.files === 1 ? "" : "s"}` +
+      changedSince,
   );
 
   for (const finding of report.findings) {
@@ -36,7 +42,7 @@ export function renderHuman(report: LintReport): string {
 
 /** The machine-readable `--json` stdout document, mirroring the binary's finding shape. */
 export function renderJson(report: LintReport): string {
-  const document = {
+  const document: Record<string, unknown> = {
     mode: "source",
     ok: report.ok,
     backend: report.backend,
@@ -49,5 +55,13 @@ export function renderJson(report: LintReport): string {
       errors: f.errors,
     })),
   };
+  const selection = report.selection;
+  if (selection?.mode === "changed" && selection.base !== null) {
+    // The selection provenance, disclosed only for the runs where the diff
+    // chose the files — the SPGD-858 disclosure, so a thin selection is
+    // never confidently mis-attributed to the walk. Walk/explicit documents
+    // carry no selection block, byte-identical to their previous shape.
+    document.selection = { mode: "changed", base: selection.base, note: selection.note };
+  }
   return `${JSON.stringify(document, null, 2)}\n`;
 }

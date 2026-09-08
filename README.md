@@ -552,8 +552,27 @@ so extraction and validation both belong to the binary, invoked as `validate-int
 ```bash
 specguard lint            # walk the current directory
 specguard lint src/a.ts   # check named files
+specguard lint --changed  # check only what changed against the default branch
 specguard lint --json     # machine-readable report on stdout
 ```
+
+`--changed[=<base>]` is the CI selection mode: it picks the annotated sources
+in the git diff against the **merge base with the default branch**
+(`origin/HEAD`, then `origin/main`/`origin/master`, then their local names) —
+never a bare working-tree-vs-index `git diff --name-only`, which is empty on a
+clean CI checkout and would exit green having checked nothing. Deleted paths
+are never selected; the selection is scoped to the current directory, matching
+the walk (`--changed` under `<repo>/packages/app` checks that package's
+changed files); `--changed=<base>` overrides the base for pipelines that know
+better. Outside a git repository, or with no resolvable base, the run is exit
+2; when no default-branch ref exists the diff falls back to HEAD (uncommitted
+work only) and says so on stderr. A selection that comes up empty stays exit
+0 and says WHY on stderr — nothing changed against the base, nothing matched
+the annotated extensions, or everything that matched is outside the current
+directory — so "checked nothing" can never read as "checked N files, found
+nothing". `--changed` cannot be combined with named files (exit 2). A
+`--changed` run discloses its provenance: `changed since <base>` in the human
+report and a `selection` block (`mode`, `base`, `note`) in `--json`.
 
 Point the client at a binary with `SPECGUARD_VALIDATE_INTENT=/path/to/validate-intent` (a path, not
 a command name; see slice 2). Without a resolvable binary the command still works for repositories

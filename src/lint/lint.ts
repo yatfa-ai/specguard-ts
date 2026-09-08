@@ -3,7 +3,14 @@ import {
   checkWithBackend,
   type ValidatorFinding,
 } from "./backend.js";
-import { LintUsageError, SCAN_MAX_BYTES, scanTokens, selectFiles } from "./discover.js";
+import {
+  ANNOTATED_EXTENSIONS,
+  LintUsageError,
+  SCAN_MAX_BYTES,
+  scanTokens,
+  selectFiles,
+  type FileSelection,
+} from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 
 /**
@@ -55,10 +62,20 @@ export interface LintReport {
   findings: LintFinding[];
   /** Provenance/errors for stderr — never part of the stdout document. */
   stderr: string[];
+  /** How the files in scope were selected. Null on the misuse paths, where
+   * selection never happened. The renderers disclose it only for `changed`
+   * runs, so walk/explicit documents stay byte-identical to their previous
+   * shape. */
+  selection: FileSelection | null;
 }
 
 export interface LintOptions extends ValidatorDeps {
-  json?: boolean;
+  json?: boolean | undefined;
+  /** Select files from the git diff (`--changed`) instead of the walk. */
+  changed?: boolean | undefined;
+  /** Explicit diff base for changed mode (`--changed=<base>`); undefined
+   * derives the merge base with the default branch. */
+  base?: string | undefined;
 }
 
 /** Null-tolerant by design: only FAILING findings carry a kind, and a passing
@@ -68,13 +85,52 @@ function aboutFile(kind: string | null): boolean {
 }
 
 /**
+ * Names the filter that actually emptied a `--changed` selection. Saying
+ * "nothing in the diff matched" when an annotated file demonstrably changed —
+ * just not under this directory — is worse than saying nothing: it reads as a
+ * conclusion and stops the reader looking. `outsideRoot` and `unreadable`
+ * are independent counters over disjoint branches of the same partition, so
+ * both can be positive at once and the clauses are additive — naming only
+ * the first would leave the reader doing arithmetic and concluding the
+ * missing files were checked (the Ruby client's `changed_empty_reason` /
+ * `changed_excluded_reason` ported verbatim in structure).
+ */
+function changedEmptyReason(selection: FileSelection): string {
+  // Invariant: selectChanged is the only producer of mode "changed" and it
+  // always populates base and stats.
+  const stats = selection.stats!;
+  const base = selection.base!;
+
+  if (stats.changed === 0) return `nothing changed against ${base}`;
+  if (stats.matches === 0) {
+    return (
+      `${stats.changed} file${stats.changed === 1 ? "" : "s"} changed against ${base}, ` +
+      `none matching the annotated extensions (${ANNOTATED_EXTENSIONS.join(", ")})`
+    );
+  }
+
+  const matched =
+    `${stats.matches} changed annotated-source file${stats.matches === 1 ? "" : "s"} against ${base}`;
+  if (stats.outsideRoot === 0) return `${matched} could not be read`;
+
+  let reason =
+    `${matched}, but ${stats.outsideRoot} ${stats.outsideRoot === 1 ? "is" : "are"} outside ` +
+    `${process.cwd()} (--changed selects only files under the current directory)`;
+  if (stats.unreadable > 0) reason += ` and ${stats.unreadable} could not be read`;
+  return reason;
+}
+
+/**
  * Run the lint. Returns the report with its exit code; NEVER throws past a
  * typed verdict (usage and backend failures are carried as exit-2 reports).
  */
 export function lint(argv: string[], options: LintOptions = {}): LintReport {
   let selection;
   try {
-    selection = selectFiles(argv);
+    selection = selectFiles(argv, process.cwd(), {
+      changed: options.changed === true,
+      base: options.base,
+    });
   } catch (error) {
     if (error instanceof LintUsageError) {
       return {
@@ -85,10 +141,20 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         summary: { files: 0, annotations: 0, malformed: 0, unreadable: 0 },
         findings: [],
         stderr: [`specguard lint: error: ${error.message}`],
+        selection: null,
       };
     }
     throw error;
   }
+
+  // `--changed` provenance that can only produce a thin selection is never
+  // silent: the HEAD-fallback / base-is-HEAD disclosure rides stderr on EVERY
+  // changed run that carries it, empty selection or not. A quiet degrade to
+  // diff-HEAD is the SPGD-76-shaped failure this mode exists to prevent.
+  const noteLines =
+    selection.mode === "changed" && selection.note !== null
+      ? [`specguard lint: warning: ${selection.note}`]
+      : [];
 
   const scans = scanTokens(selection.files);
   const tokenCount = scans.reduce((sum, scan) => sum + scan.tokens, 0);
@@ -98,6 +164,30 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   const unscannable = scans.filter((s) => s.unscannable);
 
   if (selection.files.length === 0) {
+    if (selection.mode === "changed") {
+      // The diff legitimately selected nothing, and the exit stays 0 — the
+      // exit code is not the lever ("checked nothing" must never read as
+      // "checked N files, found nothing"). What is load-bearing is stderr
+      // naming WHICH filter emptied the selection: nothing changed at all,
+      // nothing matched the annotated extensions, or everything that matched
+      // is outside the current directory. A confidently wrong reason is
+      // worse than a quiet one (the Ruby client's `changed_empty_reason`).
+      return {
+        ok: true,
+        exitCode: EXIT_OK,
+        backend: null,
+        backendNote: null,
+        summary: { files: 0, annotations: 0, malformed: 0, unreadable: 0 },
+        findings: [],
+        stderr: [
+          `specguard lint: warning: selected 0 annotated source files — ${
+            changedEmptyReason(selection)
+          }`,
+          ...noteLines,
+        ],
+        selection,
+      };
+    }
     // Nothing in scope. Loud on stderr (so "checked nothing" is never
     // mistaken for "checked 12 files, found nothing"), exit 0 by contract.
     return {
@@ -110,6 +200,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       stderr: [
         `specguard lint: warning: selected 0 annotated source files — nothing to check`,
       ],
+      selection,
     };
   }
 
@@ -128,8 +219,10 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         summary: { files: selection.files.length, annotations: 0, malformed: 0, unreadable: 0 },
         findings: [],
         stderr: [
+          ...noteLines,
           `specguard lint: warning: no annotations found in ${selection.files.length} file(s); the validator backend was not needed (${resolution.code})`,
         ],
+        selection,
       };
     }
     if (unscannable.length > 0) {
@@ -153,8 +246,10 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         },
         findings: [],
         stderr: [
+          ...noteLines,
           `specguard lint: error: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
         ],
+        selection,
       };
     }
     // Annotations exist and nothing can validate them: the operator could
@@ -173,13 +268,16 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       },
       findings: [],
       stderr: [
+        ...noteLines,
         `specguard lint: error: ${tokenCount} @intent: annotation token(s) found but no validator backend could be resolved: ${resolution.reason}`,
       ],
+      selection,
     };
   }
 
   const backend = { path: resolution.path, identity: resolution.identity };
   const stderr = [
+    ...noteLines,
     `specguard lint: validated by ${resolution.path}` +
       (resolution.identity !== null ? ` (${resolution.identity})` : ""),
   ];
@@ -197,6 +295,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       summary: { files: selection.files.length, annotations: 0, malformed: 0, unreadable: 0 },
       findings: [],
       stderr: [`specguard lint: error: ${message}`],
+      selection,
     };
   }
 
@@ -223,6 +322,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         ...stderr,
         `specguard lint: error: ${unreadable} file(s) could not be read: ${named.join(", ")}`,
       ],
+      selection,
     };
   }
 
@@ -234,5 +334,6 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
     summary: { files: selection.files.length, annotations, malformed, unreadable },
     findings,
     stderr,
+    selection,
   };
 }
