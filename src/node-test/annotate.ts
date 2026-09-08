@@ -222,7 +222,14 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // LOOKBACK_LINES above it.
       const annotationLine = row.line_number - ANNOTATION_LOOKBACK_LINES;
       if (annotationLine <= 0) return row;
-      const key = `${row.file_path}:${annotationLine}`;
+      // SPGD-1011: the row leg keys through the SAME normalization as the
+      // finding leg above. A raw `row.file_path` can never meet the map: on
+      // Windows every node:path helper yields backslash spellings
+      // (`a\special\login.test.ts` vs `a/special/login.test.ts` — never
+      // equal, so every annotated row silently launders to "unannotated"),
+      // and even on POSIX any spelling that differs from discovery's
+      // (absolute pass-through) misses. Key-construction only.
+      const key = `${normalizeRepoPath(row.file_path, repoRoot)}:${annotationLine}`;
       if (!byCoordinate.has(key)) return row;
       annotated += 1;
       return { ...row, status: "annotated" as const, intent: byCoordinate.get(key) ?? null };
