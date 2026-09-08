@@ -91,9 +91,10 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     if (tokenCount === 0 && unscannable.length > 0) {
       // SPGD-929's arm. With zero tokens no binary is ever resolved, so this
       // one line is the pass's only warning. The tokens-present arm below
-      // degrades on the same unscannable files plus the binary's read
-      // findings, folded into ONE de-duplicated line, so the pass warns at
-      // most once.
+      // degrades on the UNREADABLE of those unscannable files — the oversize
+      // arm is exempt there, SPGD-1006: the backend reads oversize files and
+      // annotates their rows — plus the binary's read findings, folded into
+      // one de-duplicated line, so the pass warns at most once.
       const named = unscannable.map((scan) => scan.file);
       warn(
         `SpecGuard: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}; telemetry ships unannotated. The test run is unaffected.`,
@@ -102,21 +103,22 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     }
 
     // SPGD-971: the tokens-present arm carries the same duty SPGD-929 gave
-    // its sibling above — a file this pass could not look at is "could not
-    // look", never "nothing to check". Two sources feed one de-duplicated
-    // name list, so a file that is both unscannable and read-failed is named
-    // once and the pass still emits at most one warning line:
-    //   * discovery-side: `unscannable` from scanTokens (unreadable or over
-    //     SCAN_MAX_BYTES), and
+    // its sibling above — a file NO reader could look at is "could not
+    // look", never "nothing to check". Two sources feed the POST-BACKEND
+    // name list below, de-duplicated, so a file that is both unscannable
+    // (its unreadable arm) and read-failed is named once and the pass still
+    // emits at most one warning line:
+    //   * discovery-side: only the UNREADABLE arm of `unscannable` from
+    //     scanTokens — the oversize arm is excluded from this list, riding
+    //     `unscannableNames` into the early-fail arms only (the split is
+    //     SPGD-1006's; see the block beneath this one), and
     //   * backend-side: `kind: "read"` findings that the row-mapping loop
     //     below would otherwise silently skip (a read finding carries
     //     ok:false, so its first `continue` drops it — the count must be
     //     taken before that skip; the loop itself is untouched).
     // `no-match` is deliberately NOT folded in: an unmatched file is not an
     // unreadable one, whatever lint.ts's aboutFile() lumps together. The
-    // never-fail guarantee is untouched: no throw, no exit-code change, and
-    // the row mapping below is exactly what it was — only `degraded` and the
-    // warning line move.
+    // never-fail guarantee is untouched: no throw, no exit-code change.
     //
     // SPGD-1006: the two sources do NOT license the same downstream claim,
     // so they no longer share one list. Discovery's `unscannable` carries
