@@ -108,6 +108,17 @@ export interface SelectOptions {
   base?: string | undefined;
 }
 
+/**
+ * Why a scan could not look at a file — the two facts SPGD-1006 found riding
+ * one flag:
+ *   * "unreadable": the read itself failed. Nobody can look at this file —
+ *     the validate-intent binary will fail on it too.
+ *   * "oversize": the file exceeds this client's SCAN_MAX_BYTES token-scan
+ *     budget. A client-side verdict only; the binary has no size cap and
+ *     reads the file fine.
+ */
+export type UnscannableReason = "unreadable" | "oversize";
+
 export interface FileScan {
   file: string;
   /** Token occurrences on any line — a gate count, never a verdict. */
@@ -116,6 +127,14 @@ export interface FileScan {
    * SCAN_MAX_BYTES) — a `tokens: 0` on such a file means "could not look",
    * never "looked and found nothing". */
   unscannable: boolean;
+  /** Which of the two "could not look" facts holds (SPGD-1006). Null when
+   * `unscannable` is false. Consumers split on this: a "could not look"
+   * gate must not be laundered into "nothing to check", so it reads
+   * `unscannable` — but a "ships unannotated" claim must name ONLY
+   * `unreadable` files. An oversize file is read and ratified by the
+   * size-cap-free binary, so its rows annotate; naming it as unannotated
+   * would call this same pass's annotated rows unannotated. */
+  unscannableReason: UnscannableReason | null;
 }
 
 export class LintUsageError extends Error {}
@@ -390,16 +409,25 @@ export const SCAN_MAX_BYTES = 4 * 1024 * 1024;
  * failure; when none does, that flag is the only witness separating "could
  * not look at this file" from "nothing to check" (SPGD-926: both used to be
  * the same `tokens: 0`, and the no-binary degrade trusted it).
+ *
+ * SPGD-1006: the flag's two causes are also told apart (`unscannableReason`)
+ * because they do not license the same downstream claim. "Unreadable" is a
+ * fact about the file; "oversize" is a fact about THIS client's scan budget,
+ * and the size-cap-free binary ratifies oversize files normally — so a
+ * consumer asserting "these files ship unannotated" must select on the
+ * reason, never on the bare flag.
  */
 export function scanTokens(files: string[]): FileScan[] {
   return files.map((file) => {
     let text: string;
     try {
       const buf = fs.readFileSync(file);
-      if (buf.byteLength > SCAN_MAX_BYTES) return { file, tokens: 0, unscannable: true };
+      if (buf.byteLength > SCAN_MAX_BYTES) {
+        return { file, tokens: 0, unscannable: true, unscannableReason: "oversize" };
+      }
       text = buf.toString("utf8");
     } catch {
-      return { file, tokens: 0, unscannable: true };
+      return { file, tokens: 0, unscannable: true, unscannableReason: "unreadable" };
     }
     let tokens = 0;
     let at = text.indexOf(INTENT_TOKEN);
@@ -407,6 +435,6 @@ export function scanTokens(files: string[]): FileScan[] {
       tokens += 1;
       at = text.indexOf(INTENT_TOKEN, at + INTENT_TOKEN.length);
     }
-    return { file, tokens, unscannable: false };
+    return { file, tokens, unscannable: false, unscannableReason: null };
   });
 }

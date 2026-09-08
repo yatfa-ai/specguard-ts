@@ -459,6 +459,60 @@ test(
   },
 );
 
+test(
+  "SPGD-1006: an oversize file the backend ratified is not named as shipping unannotated, and its rows annotate",
+  () => {
+    // The criterion that FAILS on origin/main (90db6f6): a >4 MB readable,
+    // validly annotated file was discovery-unscannable (the token-scan
+    // budget) yet backend-annotated in the SAME pass — and the ships-
+    // unannotated warning named it besides. Both halves are pinned in one
+    // pass. The gate needs a token from somewhere to reach the backend, so
+    // a small readable token-bearer rides along (the SPGD-971 mixed
+    // fixture's shape).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    const big = path.join(root, "big.test.js");
+    const bigAnnotation = '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\n';
+    const filler = "// filler line\n";
+    fs.writeFileSync(
+      big,
+      bigAnnotation + filler.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / filler.length)),
+    );
+    assert.ok(fs.statSync(big).size > SCAN_MAX_BYTES); // pin the fixture's premise
+    fs.writeFileSync(
+      path.join(root, "good.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"z"}\ntest("y", () => {});\n',
+    );
+    // The binary reads big.test.js FINE (no size cap binary-side) and
+    // returns a PASSING finding for its line-1 annotation — the exact
+    // finding the old warning falsely claimed could not exist.
+    const binary = stubBackend(
+      [
+        { file: "big.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
+        { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_REJECT },
+      ],
+      2,
+    );
+    const warnings: string[] = [];
+    const input = [row("big.test.js", 2, "x"), row("good.test.js", 2, "y")];
+    const out = annotateRows(input, {
+      repoRoot: root,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    // Half 1 — the rows: the oversize file's row annotates, intent verbatim.
+    assert.equal(out.annotated, 2);
+    assert.equal(out.rows[0]!.status, "annotated");
+    assert.deepEqual(out.rows[0]!.intent, INTENT_APPLY);
+    assert.equal(out.rows[1]!.status, "annotated");
+    assert.deepEqual(out.rows[1]!.intent, INTENT_REJECT);
+    // Half 2 — the naming: NO warning at all. The pass has nothing degraded
+    // to say about a file it fully annotated: it is not named as shipping
+    // unannotated, and the pass does not degrade.
+    assert.deepEqual(warnings, []);
+    assert.equal(out.degraded, false);
+  },
+);
+
 test("a row whose line - lookback lands on a non-annotation line stays unannotated", () => {
   // The bare test's line-1 lookback points at a blank line, not a finding.
   const binary = stubBackend(passingFindings(), 2);
