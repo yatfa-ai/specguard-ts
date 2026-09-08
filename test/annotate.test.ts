@@ -537,3 +537,100 @@ test("absolute finding paths normalize to the row's repo-relative coordinate", (
   });
   assert.equal(out.annotated, 2);
 });
+
+// ---------------------------------------------------------------------------
+// SPGD-1011: the ROW leg of the join is normalized like the finding leg.
+// The coordinate join is spelled twice inside annotateRows — SPGD-971 put
+// the finding key through `normalizeRepoPath` and left the row key RAW ten
+// lines below. On Windows every node:path helper (relative, isAbsolute,
+// sep) yields backslash spellings, so the raw row key
+// (`a\special\login.test.ts:41`) can never equal the normalized finding key
+// (`a/special/login.test.ts:41`): every annotated row silently launders to
+// "unannotated", `annotated: 0`, no warning — the POST succeeds and the
+// platform reads the run as a suite of dark tests. The same raw key also
+// misses whenever the row's spelling differs from discovery's (absolute
+// pass-through), even on POSIX.
+// ---------------------------------------------------------------------------
+
+test(
+  "SPGD-1011: every row-side spelling re-derives to the finding key the map already holds (absolute included)",
+  () => {
+    // The map invariant, behaviorally: whatever spelling a row's file_path
+    // carries, the key looked up in `byCoordinate` must be the same one the
+    // finding leg filed — the mapping may not represent one coordinate in
+    // two spellings. The ABSOLUTE spelling is the discriminator (discovery
+    // names files with path.join; the pre-fix raw row key could not meet
+    // the normalized map), and it discriminates on every platform; the
+    // forward-slash arm is the byte-identical pin — normalization must be
+    // the identity it always was on the spelling that already joined.
+    for (const spelling of ["fixtures/annotated.test.js", join(pkgRoot, "fixtures", "annotated.test.js")]) {
+      const warnings: string[] = [];
+      const binary = stubBackend(passingFindings().slice(0, 1), 1);
+      const out = annotateRows([row(spelling, L_APPLY, "applies a valid promo code")], {
+        repoRoot: pkgRoot,
+        env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+        warn: (m) => warnings.push(m),
+      });
+      assert.deepEqual(warnings, []);
+      assert.equal(out.annotated, 1, `row spelling ${spelling} must join the normalized finding key`);
+      assert.equal(out.rows[0]!.status, "annotated");
+      assert.deepEqual(out.rows[0]!.intent, INTENT_APPLY); // verbatim
+    }
+  },
+);
+
+test(
+  "SPGD-1011: a backslash-spelled row annotates against the posix-spelled finding key (win32)",
+  // The Windows failure mode, pinned: the collector may hand the row a
+  // backslash spelling while the finding leg keys posix. On POSIX a
+  // backslash is a legal filename character and node:path leaves it
+  // verbatim — the same literal cannot fold there, so this fixture is a
+  // REAL test only where sep is "\\" (the isRoot precedent above: a
+  // fixture is honest only where its premise holds).
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : `backslash folding is win32 node:path behavior; on ${process.platform} a backslash path is a literal filename and cannot join a posix key`,
+  },
+  () => {
+    const binary = stubBackend(passingFindings().slice(0, 1), 1);
+    const warnings: string[] = [];
+    const out = annotateRows([row("fixtures\\annotated.test.js", L_APPLY, "applies a valid promo code")], {
+      repoRoot: pkgRoot,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.deepEqual(warnings, []); // the join succeeds — nothing degrades
+    assert.equal(out.annotated, 1);
+    assert.equal(out.rows[0]!.status, "annotated");
+    assert.deepEqual(out.rows[0]!.intent, INTENT_APPLY); // verbatim
+  },
+);
+
+test(
+  "SPGD-1011: an out-of-root row keeps its raw spelling and still joins the verbatim finding",
+  () => {
+    // Pass-through preserved: normalizeRepoPath hands an out-of-root path
+    // back unchanged BY DESIGN (a nonsense ../ escape is never minted), so
+    // an out-of-root coordinate joins when both legs carry the same
+    // verbatim spelling — pre- and post-fix alike. This pins that the row
+    // leg's normalization did not start rewriting paths the finding leg
+    // echoes verbatim: over-normalize one leg and this join goes dark.
+    const outside = join(os.tmpdir(), "specguard-1011-elsewhere", "out.test.ts");
+    const binary = stubBackend(
+      [{ file: outside, line: 1, kind: null, ok: true, errors: [], intent: INTENT_REJECT }],
+      1,
+    );
+    const warnings: string[] = [];
+    const out = annotateRows([row(outside, 2, "out-of-root example")], {
+      repoRoot: pkgRoot,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.deepEqual(warnings, []);
+    assert.equal(out.annotated, 1);
+    assert.equal(out.rows[0]!.status, "annotated");
+    assert.deepEqual(out.rows[0]!.intent, INTENT_REJECT);
+  },
+);
