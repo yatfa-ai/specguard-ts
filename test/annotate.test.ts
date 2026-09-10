@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 const { join, dirname } = path;
 
-import { annotateRows, ANNOTATION_LOOKBACK_LINES } from "../src/node-test/annotate.js";
+import { annotateRows, ANNOTATION_LOOKBACK_LINES, normalizeRepoPath } from "../src/node-test/annotate.js";
 import type { SpecRow } from "../src/core/types.js";
 import { SCHEMA_CONTRACT_DIGEST, VALIDATE_INTENT_ENV_VAR } from "../src/core/validator.js";
 import { SCAN_MAX_BYTES } from "../src/lint/discover.js";
@@ -553,7 +553,7 @@ test("absolute finding paths normalize to the row's repo-relative coordinate", (
 // ---------------------------------------------------------------------------
 
 test(
-  "SPGD-1011: every row-side spelling re-derives to the finding key the map already holds (absolute included)",
+  "SPGD-1011: every row-side spelling re-derives to the finding key the map already holds (absolute and ./ included)",
   () => {
     // The map invariant, behaviorally: whatever spelling a row's file_path
     // carries, the key looked up in `byCoordinate` must be the same one the
@@ -563,7 +563,17 @@ test(
     // the normalized map), and it discriminates on every platform; the
     // forward-slash arm is the byte-identical pin — normalization must be
     // the identity it always was on the spelling that already joined.
-    for (const spelling of ["fixtures/annotated.test.js", join(pkgRoot, "fixtures", "annotated.test.js")]) {
+    // SPGD-1026 adds the leading-`./` arm: a `./`-spelled collector echo is
+    // the same non-absolute class the vitest collector's `virtual/some-id`
+    // pin already calls a real population, and pre-fix it keyed apart from
+    // the map (`./a/…:41` vs `a/…:41`) — the laundering miss again.
+    for (
+      const spelling of [
+        "fixtures/annotated.test.js",
+        "./fixtures/annotated.test.js",
+        join(pkgRoot, "fixtures", "annotated.test.js"),
+      ]
+    ) {
       const warnings: string[] = [];
       const binary = stubBackend(passingFindings().slice(0, 1), 1);
       const out = annotateRows([row(spelling, L_APPLY, "applies a valid promo code")], {
@@ -632,5 +642,114 @@ test(
     assert.equal(out.annotated, 1);
     assert.equal(out.rows[0]!.status, "annotated");
     assert.deepEqual(out.rows[0]!.intent, INTENT_REJECT);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// SPGD-1026: the shared normalizer folds a LEADING `./` after the separator
+// fold — the laundering family's flagged fifth leg (926 → 929 → 971 → 1011).
+// A `./`-spelled `row.file_path` built the key `./a/…:41` while the finding
+// leg held `a/…:41`: the row shipped "unannotated" though its finding was
+// ratified, `annotated` undercounted, NO warning fired — dark tests again.
+// The join's two legs SHARE this normalizer, so no join can falsify an
+// over-fold (any fold applies to both legs identically and they still
+// meet). The guard cases are therefore pinned DIRECTLY on the exported
+// function — the repo's established instrument for pure path helpers
+// (escapeGlob is unit-tested the same way in test/lint.test.ts).
+// ---------------------------------------------------------------------------
+
+test("SPGD-1026: normalizeRepoPath folds a leading ./ so a collector-echo spelling is canonical", () => {
+  assert.equal(normalizeRepoPath("./fixtures/annotated.test.js", pkgRoot), "fixtures/annotated.test.js");
+});
+
+test(
+  "SPGD-1026: normalizeRepoPath never over-folds — bare, ../, interior ./, the degenerate ./, and non-absolute ids stay verbatim",
+  () => {
+    // Bare-relative is already canonical — the fold must be the identity it
+    // always was there (the forward-slash pin in the map-invariant fixture
+    // above is the same claim, behavioral).
+    assert.equal(normalizeRepoPath("fixtures/annotated.test.js", pkgRoot), "fixtures/annotated.test.js");
+    // A leading `..` is NOT `./` — a relative escape is never folded away.
+    assert.equal(normalizeRepoPath("../escape.ts", pkgRoot), "../escape.ts");
+    // Interior `./` is out of scope: full path-normalization territory,
+    // over-normalization risk — one leading fold, nothing more.
+    assert.equal(normalizeRepoPath("a/./b.test.ts", pkgRoot), "a/./b.test.ts");
+    // The degenerate case: `./` alone must not fold to an empty key — an
+    // empty string would mint a NEW nonsense coordinate, not normalize one.
+    assert.equal(normalizeRepoPath("./", pkgRoot), "./");
+    // The pinned non-absolute collector class (test/vitest-collector.test.ts:
+    // a vitest `moduleId` like `virtual/some-id` passes through verbatim)
+    // carries no leading `./` and must stay byte-identical.
+    assert.equal(normalizeRepoPath("virtual/some-id", pkgRoot), "virtual/some-id");
+  },
+);
+
+test("SPGD-1026: normalizeRepoPath keeps the absolute arms byte-identical", () => {
+  // In-root absolute → canonical repo-relative, exactly as before the fold.
+  assert.equal(normalizeRepoPath(join(pkgRoot, "fixtures", "annotated.test.js"), pkgRoot), "fixtures/annotated.test.js");
+  // Out-of-root absolute pass-through, verbatim BY DESIGN (SPGD-1011's
+  // behavioral out-of-root fixture pins the join side; this pins the
+  // normalizer side).
+  assert.equal(normalizeRepoPath("/elsewhere/out.test.ts", pkgRoot), "/elsewhere/out.test.ts");
+});
+
+test(
+  "SPGD-1026: a backslash-leading .\\ spelling folds AFTER the separator fold (win32)",
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : `separator folding is win32 node:path behavior; on ${process.platform} a backslash path is a literal filename`,
+  },
+  () => {
+    // The ORDER is the claim: `.\a` folds to `./a` by the separator fold
+    // FIRST, and only then the leading-`./` fold fires — landing on `a`.
+    assert.equal(normalizeRepoPath(".\\fixtures\\annotated.test.js", pkgRoot), "fixtures/annotated.test.js");
+  },
+);
+
+test(
+  "SPGD-1026: a ./-spelled backend echo and its absolute twin are ONE unannotatable entry",
+  () => {
+    // The dedup key rides the SAME normalizer as the join legs. Discovery
+    // names files absolutely while "the backend echoes whatever it was
+    // handed" (the SPGD-971 mixed-spelling premise) — here a leading-./
+    // echo of the same file. Pre-fix the two spellings keyed apart
+    // ("big.test.js" vs "./big.test.js"): two entries, two names in one
+    // warning for ONE file. Post-fix they collapse to one entry. The file
+    // is oversize on disk so discovery DOES see it — as unscannable
+    // (oversize), which SPGD-1006 deliberately keeps OUT of this warning;
+    // every name below therefore comes from the read-failed pair.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    const big = path.join(root, "big.test.js");
+    fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
+    fs.writeFileSync(
+      path.join(root, "good.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    const binary = stubBackend(
+      [
+        { file: big, line: null, kind: "read", ok: false, errors: ["read big.test.js: too large"], intent: null },
+        { file: "./big.test.js", line: null, kind: "read", ok: false, errors: ["read ./big.test.js: too large"], intent: null },
+        { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
+      ],
+      1,
+    );
+    const warnings: string[] = [];
+    const input = [row("good.test.js", 2, "x")];
+    const out = annotateRows(input, {
+      repoRoot: root,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /could not be scanned/);
+    assert.match(warnings[0]!, /1 file\(s\)/); // the two spellings collapsed to ONE entry
+    assert.equal(warnings[0]!.split("big.test.js").length - 1, 1); // named exactly once
+    assert.ok(warnings[0]!.includes(big)); // the first-seen (absolute) spelling survives
+    // The never-fail mapping is untouched: the passing finding still maps.
+    assert.equal(out.annotated, 1);
+    assert.equal(out.rows[0]!.status, "annotated");
   },
 );
