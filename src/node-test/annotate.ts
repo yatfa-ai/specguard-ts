@@ -51,9 +51,23 @@ export interface AnnotateDeps extends ValidatorDeps {
   warn?: (message: string) => void;
 }
 
-/** Mirror the collector's path normalization: repo-relative, posix separators. */
-function normalizeRepoPath(file: string, repoRoot: string): string {
-  if (!isAbsolute(file)) return file.split(sep).join("/");
+/**
+ * Mirror the collector's path normalization: repo-relative, posix separators.
+ * SPGD-1026: a LEADING `./` is folded (`./a/x.test.ts` → `a/x.test.ts`) — a
+ * `./`-spelled row (or backend echo) must build the same key the finding leg
+ * files. The fold runs AFTER the separator fold (`.\a` on win32 → `./a` →
+ * `a`) and only when a remainder survives: `./` alone stays `./` (an empty
+ * key would mint a new nonsense coordinate, not normalize). A leading `..`
+ * is NOT `./` and is never touched; interior `./` segments stay (full
+ * path-normalization territory — out of scope by the ticket).
+ */
+export function normalizeRepoPath(file: string, repoRoot: string): string {
+  if (!isAbsolute(file)) {
+    const posix = file.split(sep).join("/");
+    // Fold only a leading `./` with a non-empty remainder ("./".length is
+    // the guard: `./` alone must not collapse to "").
+    return posix.startsWith("./") && posix.length > "./".length ? posix.slice("./".length) : posix;
+  }
   const rel = relative(repoRoot, file);
   if (rel.startsWith("..") || isAbsolute(rel)) return file;
   return rel.split(sep).join("/");
@@ -228,7 +242,9 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // (`a\special\login.test.ts` vs `a/special/login.test.ts` — never
       // equal, so every annotated row silently launders to "unannotated"),
       // and even on POSIX any spelling that differs from discovery's
-      // (absolute pass-through) misses. Key-construction only.
+      // (absolute pass-through) misses. Key-construction only. SPGD-1026:
+      // the shared normalizer also folds a leading `./`, so a
+      // `./`-spelled collector echo joins the same canonical key.
       const key = `${normalizeRepoPath(row.file_path, repoRoot)}:${annotationLine}`;
       if (!byCoordinate.has(key)) return row;
       annotated += 1;
