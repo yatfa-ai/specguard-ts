@@ -679,3 +679,156 @@ test("a --changed run discloses its provenance: mode in --json, 'changed since' 
   assert.equal((JSON.parse(renderJson(walked)) as { selection?: unknown }).selection, undefined);
   assert.doesNotMatch(renderHuman(walked), /changed since/);
 });
+
+// ---------------------------------------------------------------------------
+// SPGD-1027: shallow checkouts. A depth-1 CI clone (the actions/checkout@v4
+// default) cannot answer the merge-base question — the merge base with the
+// default branch is not in its history — so the derived base is HEAD itself,
+// and the pre-shallow notes misattributed that to a "default-branch build".
+// The notes must tell the shallow story and name the remedy; non-shallow
+// output keeps its exact former text.
+// ---------------------------------------------------------------------------
+
+/** A depth-1 clone of a committed fixture — the default shallow CI shape:
+ * `.git/shallow` present, the merge base with the default branch outside the
+ * clone's history. The `file://` URL forces the smart transport: git WARNS
+ * and IGNORES `--depth` on a plain local path (a local clone is always full). */
+function shallowCloneOf(src: Fixture): Fixture {
+  const dst = makeRepo({}); // an empty directory is a legal clone target
+  git(src.root, "clone", "--depth", "1", `file://${src.root}`, dst.root);
+  git(dst.root, "config", "user.email", "specguard-test@example.com");
+  git(dst.root, "config", "user.name", "specguard-test");
+  return dst;
+}
+
+function initShallowClone(files: Record<string, string>): Fixture {
+  // The source needs history for depth 1 to CUT: git writes the `.git/shallow`
+  // marker only when the clone actually truncates, so a one-commit source
+  // yields a full clone that is not shallow at all.
+  const src = initRepo(files);
+  commitAll(src, "base");
+  fs.writeFileSync(
+    path.join(src.root, "README.md"),
+    "# history filler so a depth-1 clone truncates\n",
+  );
+  commitAll(src, "second commit — the depth cut");
+  return shallowCloneOf(src);
+}
+
+test("shallow clone, clean tree, --changed: exit 0 and the stderr note names the checkout as shallow with the remedy, never the default-branch-build guess (AC1)", () => {
+  const f = initShallowClone({ "src/a.ts": GOOD_ANNOTATION });
+  assert.equal(git(f.root, "rev-parse", "--is-shallow-repository").trim(), "true"); // the fixture is what it claims
+
+  const cli = runCliInRepo(f, ["lint", "--changed"]);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.match(
+    cli.stderr,
+    /specguard lint: warning: this checkout is a shallow \(depth-limited\) clone, so the merge base with the default branch is not in its history and the diff base is HEAD itself/,
+  );
+  assert.match(cli.stderr, /only uncommitted changes can be selected/);
+  assert.match(cli.stderr, /fetch-depth: 0/);
+  assert.match(cli.stderr, /--changed=<base>/);
+  // The retired guess must not ride ANY stderr line of the run.
+  assert.ok(
+    !cli.stderr.includes("default-branch build"),
+    `the retired "default-branch build" text appeared:\n${cli.stderr}`,
+  );
+});
+
+test("shallow clone, clean tree, --changed --json: selection.note tells the same shallow story (AC1, json leg)", () => {
+  const f = initShallowClone({ "src/a.ts": GOOD_ANNOTATION });
+  const cli = runCliInRepo(f, ["lint", "--changed", "--json"]);
+  assert.equal(cli.exit, EXIT_OK);
+  const json = JSON.parse(cli.stdout) as { selection: { mode: string; note: string | null } };
+  assert.equal(json.selection.mode, "changed");
+  const note = json.selection.note ?? "";
+  assert.match(note, /shallow \(depth-limited\) clone/);
+  assert.match(note, /fetch-depth: 0/);
+  assert.ok(!note.includes("default-branch build"));
+});
+
+test("shallow clone, --changed=<sha not in its history>: exit 2 naming the shallow cause and the fetch remedy (AC2)", () => {
+  const src = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(src, "base");
+  fs.writeFileSync(path.join(src.root, "README.md"), "# history filler\n");
+  commitAll(src, "second commit — the depth cut"); // depth 1 must truncate something
+  const f = shallowCloneOf(src);
+  // A commit made in the source AFTER the clone: the depth-1 clone cannot
+  // contain it, which is exactly what a stale/pinned base sha is in CI.
+  fs.writeFileSync(path.join(src.root, "src/a.ts"), GOOD_ANNOTATION + "\n// later\n");
+  commitAll(src, "later commit");
+  const absentSha = git(src.root, "rev-parse", "HEAD").trim();
+
+  const cli = runCliInRepo(f, ["lint", `--changed=${absentSha}`]);
+  assert.equal(cli.exit, EXIT_MISUSE);
+  assert.equal(cli.stdout, ""); // no report document on an exit-2 run
+  assert.match(cli.stderr, new RegExp(`--changed could not diff against "${absentSha}"`));
+  assert.match(cli.stderr, /this checkout is shallow and/);
+  assert.match(cli.stderr, /is not in its history/);
+  assert.match(cli.stderr, /fetch-depth: 0/);
+  assert.match(cli.stderr, /git fetch origin/);
+  assert.match(cli.stderr, /or pass a base the checkout contains/);
+});
+
+test("shallow clone with no default-branch ref: the head-fallback note tells the shallow story too, never the default-branch-build guess (second shape)", () => {
+  const f = initShallowClone({ "src/a.ts": GOOD_ANNOTATION });
+  // Strip every ref a DEFAULT_BRANCH_REFS probe could resolve — the clone's
+  // remote-tracking refs AND its own local `main` (the probes include the
+  // local names) — so the base falls back to HEAD: the second thin shape.
+  git(f.root, "checkout", "--detach");
+  git(f.root, "update-ref", "-d", "refs/remotes/origin/HEAD");
+  git(f.root, "update-ref", "-d", "refs/remotes/origin/main");
+  git(f.root, "branch", "-D", "main");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// uncommitted\n");
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.equal(selection.base, git(f.root, "rev-parse", "HEAD").trim());
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  const note = selection.note ?? "";
+  assert.match(note, /shallow \(depth-limited\) clone/);
+  assert.match(note, /fell back to HEAD/);
+  assert.match(note, /fetch-depth: 0/);
+  assert.ok(!note.includes("default-branch build"));
+});
+
+test("shallow clone, the named remedy works: an explicit base the checkout contains selects normally and carries no note (AC1 remedy pin)", () => {
+  const f = initShallowClone({ "src/a.ts": GOOD_ANNOTATION });
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// uncommitted\n");
+  const tip = git(f.root, "rev-parse", "HEAD").trim();
+
+  const selection = selectFiles([], f.root, { changed: true, base: tip });
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  assert.equal(selection.note, null); // an in-history explicit base is not a thin base
+});
+
+test("full clone (AC3): thin-base notes and the diff-failure error keep their exact pre-shallow text", () => {
+  // merge_base === HEAD, NOT shallow: the "default-branch build" note is exact.
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base"); // clean tree
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.equal(
+    selection.note,
+    "the diff base is HEAD itself (this looks like a default-branch build), " +
+      "so only uncommitted changes can be selected",
+  );
+
+  // head_fallback, NOT shallow: exact.
+  const g = initRepo({ "src/a.ts": GOOD_ANNOTATION }, "feature");
+  commitAll(g, "base");
+  const fallback = selectFiles([], g.root, { changed: true });
+  assert.equal(
+    fallback.note,
+    "no default-branch ref (origin/HEAD, origin/main, origin/master, main, master) could be found, " +
+      "so the diff base fell back to HEAD; --changed can only select uncommitted changes here",
+  );
+
+  // A diff failure in a NON-shallow repo keeps the bare message, byte-identical.
+  const absentSha = "0".repeat(40);
+  let message = "";
+  try {
+    selectFiles([], g.root, { changed: true, base: absentSha });
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  assert.equal(message, `--changed could not diff against "${absentSha}"`);
+});

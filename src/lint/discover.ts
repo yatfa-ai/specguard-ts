@@ -245,7 +245,11 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
     );
   }
 
-  const names = diffNames(resolved.base, root);
+  // One memoized probe per run, shared by the two message branches that
+  // consult it (a failed diff, a thin base note).
+  const isShallow = shallowProbe(root);
+
+  const names = diffNames(resolved.base, root, isShallow);
   const matches = names.filter(isAnnotatedSource);
 
   const top = topLevel(root);
@@ -277,7 +281,7 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
     files,
     mode: "changed",
     base: resolved.base,
-    note: baseNote(resolved.kind, resolved.base, root),
+    note: baseNote(resolved.kind, resolved.base, root, isShallow),
     stats: { changed: names.length, matches: matches.length, outsideRoot, unreadable },
   };
 }
@@ -365,21 +369,71 @@ function resolveDiffBase(
 /** NUL-separated, deleted paths dropped — the machine-readable form: without
  * `-z`, `core.quotePath` renders a non-ASCII path quoted and byte-escaped,
  * which no longer names a file. */
-function diffNames(base: string, root: string): string[] {
+function diffNames(base: string, root: string, isShallow: () => boolean): string[] {
   const run = git(["diff", "-z", "--name-only", "--diff-filter=d", base, "--"], root);
   if (!run.ok) {
+    if (isShallow()) {
+      // SPGD-1027: in a shallow checkout the overwhelmingly likely cause is
+      // that <base> is simply not in the clone's history (git's own stderr
+      // says `fatal: bad object`), and the fix is a fetch — a cause the bare
+      // message never named, leaving "bad ref" and "shallow history"
+      // indistinguishable. Non-shallow failures keep the original message.
+      throw new LintUsageError(
+        `--changed could not diff against ${JSON.stringify(base)}: this checkout is shallow and ` +
+          `${JSON.stringify(base)} is not in its history — fetch it (fetch-depth: 0, or ` +
+          `git fetch origin ${base}) or pass a base the checkout contains`,
+      );
+    }
     throw new LintUsageError(`--changed could not diff against ${JSON.stringify(base)}`);
   }
   return run.out.split("\0").filter((name) => name !== "");
+}
+
+/** Memoized per-run `git rev-parse --is-shallow-repository` probe. SPGD-1027:
+ * shallowness is consulted only in the branches where it changes the message
+ * (a derived base of HEAD, a failed diff), so the full-clone happy path makes
+ * zero new git invocations and the memo caps the probe at one per run. An
+ * unreadable answer (old git without the flag) reads as not shallow, keeping
+ * today's messages exactly. */
+function shallowProbe(root: string): () => boolean {
+  let cached: boolean | null = null;
+  return () => {
+    if (cached === null) {
+      const run = git(["rev-parse", "--is-shallow-repository"], root);
+      cached = run.ok && run.out.trim() === "true";
+    }
+    return cached;
+  };
 }
 
 /** Explains a base that can only produce a thin selection, distinguishing the
  * two ways that happens: "this is a default-branch build" is normal, while
  * "no default ref could be found" means `--changed` quietly degraded to
  * diff-HEAD — reporting the first when the second is true would be a
- * confidently wrong explanation. */
-function baseNote(kind: DiffBaseKind, base: string, root: string): string | null {
+ * confidently wrong explanation.
+ *
+ * SPGD-1027: a shallow (depth-limited) checkout reproduces both thin shapes
+ * with a third cause those two stories miss — the merge base with the default
+ * branch is not in the clone's history at all — so whenever the repo IS
+ * shallow the note tells that story and names the remedy (fetch the default
+ * branch, or pass a base the checkout contains), retiring the
+ * "default-branch build" guess for shallow repos in both shapes. */
+function baseNote(
+  kind: DiffBaseKind,
+  base: string,
+  root: string,
+  isShallow: () => boolean,
+): string | null {
+  const shallowRemedy =
+    "fetch the default branch (fetch-depth: 0) or pass --changed=<base> naming a base this checkout contains";
   if (kind === "head_fallback") {
+    if (isShallow()) {
+      return (
+        "this checkout is a shallow (depth-limited) clone and no default-branch ref " +
+        `(${DEFAULT_BRANCH_REFS.join(", ")}) is in its history, so the diff base fell back to ` +
+        `HEAD; --changed can only select uncommitted changes here — ${shallowRemedy}`
+      );
+    }
     return (
       `no default-branch ref (${DEFAULT_BRANCH_REFS.join(", ")}) could be found, so the diff base ` +
       `fell back to HEAD; --changed can only select uncommitted changes here`
@@ -388,6 +442,13 @@ function baseNote(kind: DiffBaseKind, base: string, root: string): string | null
   if (kind === "merge_base") {
     const headRun = git(["rev-parse", "HEAD"], root);
     if (headRun.ok && headRun.out.trim() === base) {
+      if (isShallow()) {
+        return (
+          "this checkout is a shallow (depth-limited) clone, so the merge base with the default " +
+          "branch is not in its history and the diff base is HEAD itself — only uncommitted " +
+          `changes can be selected; ${shallowRemedy}`
+        );
+      }
       return (
         "the diff base is HEAD itself (this looks like a default-branch build), " +
         "so only uncommitted changes can be selected"
