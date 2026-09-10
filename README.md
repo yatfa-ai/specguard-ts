@@ -566,7 +566,16 @@ the walk (`--changed` under `<repo>/packages/app` checks that package's
 changed files); `--changed=<base>` overrides the base for pipelines that know
 better. Outside a git repository, or with no resolvable base, the run is exit
 2; when no default-branch ref exists the diff falls back to HEAD (uncommitted
-work only) and says so on stderr. A selection that comes up empty stays exit
+work only) and says so on stderr. In a **shallow** checkout — the default
+depth-1 `git clone` behind `actions/checkout@v4` — the merge base with the
+default branch is not in the clone's history, so the derived base is HEAD
+itself: the empty selection stays exit 0, and its stderr note (and `--json`
+`selection.note`) names the checkout as **shallow** and the remedy — fetch the
+default branch (`fetch-depth: 0`) or pass `--changed=<base>` naming a base the
+checkout contains. An explicit `--changed=<base>` that is not in a shallow
+checkout's history is exit 2 with that cause and the same remedy, not the bare
+"could not diff against" a full clone reports for a genuinely bad ref. A
+selection that comes up empty stays exit
 0 and says WHY on stderr — nothing changed against the base, nothing matched
 the annotated extensions, or everything that matched is outside the current
 directory — so "checked nothing" can never read as "checked N files, found
