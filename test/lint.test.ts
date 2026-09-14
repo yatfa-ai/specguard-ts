@@ -441,6 +441,40 @@ test("OVERSIZED (> SCAN_MAX_BYTES) annotated file, NO binary: exit 2 — the unc
   assert.match(cli.stderr, /specguard lint: error: .*big\.ts/);
 });
 
+// --- SPGD-1124: the CLI boundary of the exit contract -----------------------
+//
+// lint() deliberately re-throws anything that is not a typed verdict; before
+// this slice the re-throw escaped run() to Node's uncaught-exception default
+// — exit 1, which the contract defines as "malformed annotations". A crashed
+// run must never wear that verdict: the boundary catch in run() lands it on
+// exit 2 with one stderr line and no document.
+
+test(
+  "an internal throw escaping lint() lands on the CLI boundary: exit 2, an internal-error line on stderr, NO document — never Node's default exit 1",
+  () => {
+    // No mock framework: the stub replaces process.cwd, whose call sits
+    // inside lint()'s selection try (the selectFiles argument list), so the
+    // plain Error takes exactly the re-throw path the SPGD-1121 crash took.
+    const out = capture();
+    const err = capture();
+    const originalCwd = process.cwd.bind(process);
+    process.cwd = () => {
+      throw new Error("synthetic boundary escape: cwd exploded");
+    };
+    try {
+      const exit = runCli(["lint"], out.stream, err.stream);
+      assert.equal(exit, EXIT_MISUSE);
+      assert.equal(out.lines.join(""), ""); // a crashed run emits no document
+      assert.match(
+        err.lines.join(""),
+        /^specguard lint: internal error: synthetic boundary escape: cwd exploded\n$/,
+      );
+    } finally {
+      process.cwd = originalCwd;
+    }
+  },
+);
+
 // --- SPGD-1001: `--changed` — the git-diff selection mode -------------------
 //
 // The Ruby client's settled decisions, ported and pinned: the diff base is
