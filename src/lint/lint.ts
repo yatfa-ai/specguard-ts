@@ -28,7 +28,11 @@ import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
  *   2  the linter could not do its job — misuse, an unresolvable/broken
  *      binary when annotations DID exist to validate, or a backend failure.
  *      Exit 1 is produced in exactly one place so it means that and nothing
- *      else; every internal failure lands on 2, never on 1.
+ *      else; every internal failure lands on 2, never on 1. That promise is
+ *      enforced at the CLI boundary: `run()` (src/cli.ts) catches whatever
+ *      escapes this module — including this function's deliberate re-throw
+ *      of an unexpected error — so a crash lands on 2 with an internal-error
+ *      line, never on Node's default uncaught-exception exit 1.
  *
  * Like the Ruby CLI, an exit-2 run emits NO report document: a document is a
  * report about what was checked, and a run that checked nothing must not
@@ -121,8 +125,12 @@ function changedEmptyReason(selection: FileSelection): string {
 }
 
 /**
- * Run the lint. Returns the report with its exit code; NEVER throws past a
- * typed verdict (usage and backend failures are carried as exit-2 reports).
+ * Run the lint. Returns the report with its exit code for every typed
+ * verdict (usage and backend failures are carried as exit-2 reports). An
+ * UNEXPECTED error is deliberately re-thrown — this function does not
+ * promise never to throw — so the crash reaches the boundary catch in
+ * `run()` (src/cli.ts), which lands it on exit 2 with an internal-error
+ * line instead of Node's default exit 1. See the header contract above.
  */
 export function lint(argv: string[], options: LintOptions = {}): LintReport {
   let selection;

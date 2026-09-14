@@ -15,7 +15,7 @@
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { lint } from "./lint/lint.js";
+import { EXIT_MISUSE, lint } from "./lint/lint.js";
 import { renderHuman, renderJson } from "./lint/report.js";
 
 interface Options {
@@ -88,18 +88,30 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
     return 0;
   }
 
-  const report = lint(parsed.paths, {
-    json: parsed.options.json,
-    changed: parsed.options.changed,
-    base: parsed.options.base ?? undefined,
-  });
-  for (const line of report.stderr) stderr.write(`${line}\n`);
-  if (report.exitCode !== 2 || report.findings.length > 0) {
-    // Exit-2-with-no-findings runs emit no document (see report.ts); an
-    // exit-2 WITH findings (unreadable files) still reports what it saw.
-    stdout.write(parsed.options.json ? renderJson(report) : renderHuman(report));
+  try {
+    const report = lint(parsed.paths, {
+      json: parsed.options.json,
+      changed: parsed.options.changed,
+      base: parsed.options.base ?? undefined,
+    });
+    for (const line of report.stderr) stderr.write(`${line}\n`);
+    if (report.exitCode !== 2 || report.findings.length > 0) {
+      // Exit-2-with-no-findings runs emit no document (see report.ts); an
+      // exit-2 WITH findings (unreadable files) still reports what it saw.
+      stdout.write(parsed.options.json ? renderJson(report) : renderHuman(report));
+    }
+    return report.exitCode;
+  } catch (error) {
+    // The boundary of the exit contract: lint() deliberately re-throws
+    // anything that is not a typed verdict, and an uncaught throw here would
+    // die as Node's uncaught-exception default — exit 1, which the contract
+    // defines as "malformed annotations". A crashed run must never wear that
+    // verdict (the SPGD-1121 crash escaped exactly this way), so the
+    // boundary catches it: one stderr line, exit 2, no document.
+    const message = error instanceof Error ? error.message : String(error);
+    stderr.write(`specguard lint: internal error: ${message}\n`);
+    return EXIT_MISUSE;
   }
-  return report.exitCode;
 }
 
 /**
