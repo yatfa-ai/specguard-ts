@@ -11,6 +11,7 @@ export {
 export { renderHuman, renderJson } from "./report.js";
 export {
   selectFiles,
+  changedNameUnion,
   scanTokens,
   ANNOTATED_EXTENSIONS,
   SKIPPED_DIRECTORIES,

@@ -251,7 +251,8 @@ export function selectFiles(
  *     the union cannot double-count and needs no dedup. No history is
  *     consulted, so the leg works in a shallow clone, and a failed call
  *     degrades to an empty leg rather than killing a run the tracked diff
- *     already serves.
+ *     already serves. The union is built with `concat`, never spread — see
+ *     `changedNameUnion`: selection must hold at any untracked-leg size.
  *   * No default-branch ref but a HEAD: the diff base falls back to HEAD
  *     (uncommitted work only) and the degrade is DISCLOSED in the returned
  *     `note` — never silently.
@@ -277,17 +278,11 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
   // selected files the diff never saw. The legs are disjoint by construction
   // (an untracked path is never a diff path), so the plain union cannot
   // double-count and needs no dedup.
-  const names: { name: string; untracked: boolean }[] = diffNames(
-    resolved.base,
-    root,
-    isShallow,
-  ).map((name) => ({ name, untracked: false }));
+  const diffLeg = diffNames(resolved.base, root, isShallow);
 
   const top = topLevel(root);
   const topDir = top === "" ? root : top; // git could not say → the common case: root IS the top
-  names.push(
-    ...untrackedLegNames(topDir).map((name) => ({ name, untracked: true })),
-  );
+  const names = changedNameUnion(diffLeg, untrackedLegNames(topDir));
 
   const matches = names.filter(({ name }) => isAnnotatedSource(name));
   const rootReal = realPath(root);
@@ -444,6 +439,26 @@ function diffNames(base: string, root: string, isShallow: () => boolean): string
 function untrackedLegNames(root: string): string[] {
   const run = git(["ls-files", "--others", "--exclude-standard", "-z"], root);
   return run.ok ? run.out.split("\0").filter((name) => name !== "") : [];
+}
+
+/** The changed-mode name set: the diff leg first, then the untracked leg,
+ * each tagged with its origin. Built with `concat`, never with a spread over
+ * a leg: `push(...leg)` is call-stack-bound and throws `RangeError: Maximum
+ * call stack size exceeded` once a leg outgrows Node's spread-argument
+ * budget — and a large untracked leg is a real shape, an early-stage
+ * repository whose `.gitignore` does not yet cover `node_modules` hands the
+ * untracked leg hundreds of thousands of entries. A crash there would die in
+ * selection, before the validator ran, and exit non-zero on empty output,
+ * which the exit contract reads as malformed annotations. `concat` iterates
+ * instead of putting the leg on the call stack, so the union holds at any
+ * leg length. */
+export function changedNameUnion(
+  diffLeg: string[],
+  untrackedLeg: string[],
+): { name: string; untracked: boolean }[] {
+  let names = diffLeg.map((name) => ({ name, untracked: false }));
+  names = names.concat(untrackedLeg.map((name) => ({ name, untracked: true })));
+  return names;
 }
 
 /** Memoized per-run `git rev-parse --is-shallow-repository` probe. SPGD-1027:

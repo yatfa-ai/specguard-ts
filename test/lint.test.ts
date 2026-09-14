@@ -7,7 +7,13 @@ import { execFileSync } from "node:child_process";
 
 import { lint, EXIT_OK, EXIT_MALFORMED, EXIT_MISUSE } from "../src/lint/lint.js";
 import { renderJson, renderHuman } from "../src/lint/report.js";
-import { selectFiles, scanTokens, escapeGlob, SCAN_MAX_BYTES } from "../src/lint/index.js";
+import {
+  selectFiles,
+  changedNameUnion,
+  scanTokens,
+  escapeGlob,
+  SCAN_MAX_BYTES,
+} from "../src/lint/index.js";
 import { SCHEMA_CONTRACT_DIGEST, VALIDATE_INTENT_ENV_VAR } from "../src/core/validator.js";
 import { run as runCli } from "../src/cli.js";
 
@@ -874,6 +880,29 @@ test("the checked-count clause says 'including N untracked' when the leg contrib
   // Walk mode stays clause-free: the disclosure is `changed`-mode's own.
   const walked = inRepo(tracked, [], trackedBinary);
   assert.doesNotMatch(renderHuman(walked), /untracked/);
+});
+
+test("the changed-mode name union is built size-safely — it must hold where spread would crash", () => {
+  // `push(...leg)` is call-stack-bound: once a leg outgrows Node's
+  // spread-argument budget it throws `RangeError: Maximum call stack size
+  // exceeded`, and a large untracked leg is a real shape (a repository whose
+  // `.gitignore` does not yet cover `node_modules`). A crash there dies in
+  // selection, before the validator runs, and exits non-zero on empty output
+  // — which the exit contract reads as malformed annotations. This pin feeds
+  // the union a leg no spread call could survive, so the property is
+  // enforced rather than remembered.
+  const untrackedLeg = Array.from(
+    { length: 500_000 },
+    (_, i) => `node_modules/pkg_${i}/lib/f.js`,
+  );
+  const union = changedNameUnion(["src/a.ts"], untrackedLeg);
+  assert.equal(union.length, untrackedLeg.length + 1);
+  // Order is part of the shape: the diff leg first, then the untracked leg.
+  assert.deepEqual(union[0], { name: "src/a.ts", untracked: false });
+  assert.deepEqual(union[union.length - 1], {
+    name: untrackedLeg[untrackedLeg.length - 1],
+    untracked: true,
+  });
 });
 
 // ---------------------------------------------------------------------------
