@@ -20,9 +20,19 @@ export function renderHuman(report: LintReport): string {
     selection?.mode === "changed" && selection.base !== null
       ? ` changed since ${selection.base}`
       : "";
+  // The `--changed` count names its provenance: files can reach the selection
+  // through the untracked leg (`discover.ts`), and "changed since <base>"
+  // alone over-claims for a file the diff never saw. When the untracked leg
+  // contributed, the line says how many — the same `stats.untracked` the
+  // selection carries, so the clause can only ever name files this run
+  // actually checked.
+  const untrackedClause =
+    selection?.mode === "changed" && (selection.stats?.untracked ?? 0) > 0
+      ? ` including ${selection.stats?.untracked} untracked`
+      : "";
   lines.push(
     `specguard lint: checked ${report.summary.files} source file${report.summary.files === 1 ? "" : "s"}` +
-      changedSince,
+      changedSince + untrackedClause,
   );
 
   for (const finding of report.findings) {

@@ -66,10 +66,15 @@ export const DEFAULT_BRANCH_REFS = [
  * Why an empty `--changed` selection is empty: one count per filter the
  * selector applied, in the order it applied them, so the empty-reason can
  * name the real cause instead of guessing at the last one. The Ruby client's
- * `Stats`, carried for the same reason it is there.
+ * `Stats`, carried for the same reason it is there. The exception is
+ * `untracked`, which filters nothing: it counts the selected files that
+ * arrived via the untracked leg, so the report can say where a file the diff
+ * never saw came from (an untracked file outside `root` is counted in
+ * `outsideRoot`, not here — this names files the run checked).
  */
 export interface ChangedStats {
-  /** Paths the diff named (deleted paths never arrive — see `diffNames`). */
+  /** Paths the diff named plus the untracked leg's paths (deleted paths
+   * never arrive — see `diffNames`). */
   changed: number;
   /** Of those, the ones matching the annotated extensions. */
   matches: number;
@@ -77,6 +82,10 @@ export interface ChangedStats {
   outsideRoot: number;
   /** Matched, in-root paths that are not existing regular files. */
   unreadable: number;
+  /** Selected files that arrived via the untracked leg — never a diff path,
+   * so the legs cannot double-count. Additive with a default of 0, the same
+   * shape the Ruby client's SPGD-1119 fix gave its `Stats`. */
+  untracked: number;
 }
 
 export interface FileSelection {
@@ -228,6 +237,21 @@ export function selectFiles(
  *     everything outside `root` is counted (`outsideRoot`) rather than
  *     silently taken — a thin selection must say it is thin because of the
  *     directory, not "nothing changed".
+ *   * The name set is a **union**: the diff's paths plus ONE `git ls-files
+ *     --others --exclude-standard -z` call per selection, run at the toplevel
+ *     so its repo-root-relative output flows through the same scoping as the
+ *     diff's (from a subdirectory `ls-files` emits cwd-relative paths, which
+ *     would defeat it). A brand-new file that has never been `git add`ed is
+ *     part of "what changed against <base>, whether or not the change is
+ *     committed yet" — the mode's own promise — and a diff-only name set
+ *     would ride it past the gate behind a non-empty checked-count in the
+ *     mixed shape every real working tree has. `--exclude-standard` is the
+ *     boundary: `.gitignore`d paths never enter the selection. The legs are
+ *     disjoint by construction (an untracked path is never a diff path), so
+ *     the union cannot double-count and needs no dedup. No history is
+ *     consulted, so the leg works in a shallow clone, and a failed call
+ *     degrades to an empty leg rather than killing a run the tracked diff
+ *     already serves.
  *   * No default-branch ref but a HEAD: the diff base falls back to HEAD
  *     (uncommitted work only) and the degrade is DISCLOSED in the returned
  *     `note` — never silently.
@@ -249,17 +273,30 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
   // consult it (a failed diff, a thin base note).
   const isShallow = shallowProbe(root);
 
-  const names = diffNames(resolved.base, root, isShallow);
-  const matches = names.filter(isAnnotatedSource);
+  // Each name is tagged with its leg so `stats.untracked` can attribute the
+  // selected files the diff never saw. The legs are disjoint by construction
+  // (an untracked path is never a diff path), so the plain union cannot
+  // double-count and needs no dedup.
+  const names: { name: string; untracked: boolean }[] = diffNames(
+    resolved.base,
+    root,
+    isShallow,
+  ).map((name) => ({ name, untracked: false }));
 
   const top = topLevel(root);
   const topDir = top === "" ? root : top; // git could not say → the common case: root IS the top
+  names.push(
+    ...untrackedLegNames(topDir).map((name) => ({ name, untracked: true })),
+  );
+
+  const matches = names.filter(({ name }) => isAnnotatedSource(name));
   const rootReal = realPath(root);
 
   const files: string[] = [];
   let outsideRoot = 0;
   let unreadable = 0;
-  for (const name of matches) {
+  let untracked = 0;
+  for (const { name, untracked: fromUntrackedLeg } of matches) {
     const absolute = path.join(topDir, name);
     const relative = path.relative(rootReal, absolute);
     const outside = relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) ||
@@ -273,6 +310,7 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
       unreadable += 1;
     } else {
       files.push(relative);
+      if (fromUntrackedLeg) untracked += 1;
     }
   }
   files.sort();
@@ -282,7 +320,13 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
     mode: "changed",
     base: resolved.base,
     note: baseNote(resolved.kind, resolved.base, root, isShallow),
-    stats: { changed: names.length, matches: matches.length, outsideRoot, unreadable },
+    stats: {
+      changed: names.length,
+      matches: matches.length,
+      outsideRoot,
+      unreadable,
+      untracked,
+    },
   };
 }
 
@@ -387,6 +431,19 @@ function diffNames(base: string, root: string, isShallow: () => boolean): string
     throw new LintUsageError(`--changed could not diff against ${JSON.stringify(base)}`);
   }
   return run.out.split("\0").filter((name) => name !== "");
+}
+
+/** The untracked leg of the `--changed` name set: `git ls-files --others
+ * --exclude-standard -z`, run at the toplevel so its repo-root-relative
+ * output shares the diff leg's coordinate space. `--exclude-standard` is the
+ * `.gitignore` boundary (scratch directories, vendored code, build output
+ * never enter the selection); `-z` for the same quotePath reasons as the
+ * diff leg; no history is consulted, so the leg works in a shallow clone. A
+ * failed call degrades to an empty leg rather than killing a run the tracked
+ * diff already serves — git says nothing, so the union is the diff alone. */
+function untrackedLegNames(root: string): string[] {
+  const run = git(["ls-files", "--others", "--exclude-standard", "-z"], root);
+  return run.ok ? run.out.split("\0").filter((name) => name !== "") : [];
 }
 
 /** Memoized per-run `git rev-parse --is-shallow-repository` probe. SPGD-1027:

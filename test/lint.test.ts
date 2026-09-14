@@ -487,7 +487,10 @@ test("changed mode selects exactly the committed change against the merge base",
   assert.equal(selection.base, git(f.root, "merge-base", "HEAD", "main").trim());
   // A feature branch's merge base is not HEAD: no apology needed.
   assert.equal(selection.note, null);
-  assert.deepEqual(selection.stats, { changed: 2, matches: 2, outsideRoot: 0, unreadable: 0 });
+  assert.deepEqual(
+    selection.stats,
+    { changed: 2, matches: 2, outsideRoot: 0, unreadable: 0, untracked: 0 },
+  );
 });
 
 test("changed mode with a malformed annotation: exit 1 naming file and line; the untouched file is not checked", () => {
@@ -522,7 +525,10 @@ test("a deleted annotated file in the diff is dropped, never selected or counted
   // `--diff-filter=d` dropped the deletion at the git layer: not a selected
   // file, not a match, not an unreadable count — it never arrived.
   assert.deepEqual(selection.files, ["src/a.ts"]);
-  assert.deepEqual(selection.stats, { changed: 1, matches: 1, outsideRoot: 0, unreadable: 0 });
+  assert.deepEqual(
+    selection.stats,
+    { changed: 1, matches: 1, outsideRoot: 0, unreadable: 0, untracked: 0 },
+  );
 });
 
 test("changed mode is cwd-scoped: running under a subdirectory selects only its files", () => {
@@ -537,7 +543,10 @@ test("changed mode is cwd-scoped: running under a subdirectory selects only its 
   // widen to repo scope while the walk stays cwd-scoped.
   const selection = selectFiles([], path.join(f.root, "packages/app"), { changed: true });
   assert.deepEqual(selection.files, ["src/a.ts"]);
-  assert.deepEqual(selection.stats, { changed: 2, matches: 2, outsideRoot: 1, unreadable: 0 });
+  assert.deepEqual(
+    selection.stats,
+    { changed: 2, matches: 2, outsideRoot: 1, unreadable: 0, untracked: 0 },
+  );
 });
 
 test("--changed=<base> overrides the derived merge base", () => {
@@ -678,6 +687,193 @@ test("a --changed run discloses its provenance: mode in --json, 'changed since' 
   const walked = inRepo(f, [], binary);
   assert.equal((JSON.parse(renderJson(walked)) as { selection?: unknown }).selection, undefined);
   assert.doesNotMatch(renderHuman(walked), /changed since/);
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-1121: untracked files. `git diff` cannot see a file that has never
+// been `git add`ed, but "what changed against <base>, whether or not the
+// change is committed yet" covers it — a diff-only name set rode the branch's
+// newest spec past the gate behind a non-empty checked-count in the mixed
+// shape every real working tree has, and fired a false "nothing changed" in
+// the untracked-only shape. The name set is the union of the diff leg and
+// one `git ls-files --others --exclude-standard -z` call per selection (the
+// specguard-ts mirror of the Ruby client's landed SPGD-1119).
+// ---------------------------------------------------------------------------
+
+test("changed mode selects an untracked new spec alongside a tracked change (the mixed shape)", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  // NEVER added: invisible to `git diff`, visible to `git status` as `??`.
+  fs.writeFileSync(path.join(f.root, "src/new_untracked.ts"), BAD_ANNOTATION);
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts", "src/new_untracked.ts"]);
+  assert.deepEqual(
+    selection.stats,
+    { changed: 2, matches: 2, outsideRoot: 0, unreadable: 0, untracked: 1 },
+  );
+});
+
+test("changed mode with a malformed untracked annotation: exit 1, not exit 0 behind a checked-count of 1", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(f.root, "src/new_untracked.ts"), BAD_ANNOTATION);
+
+  const binary = stubBackend(
+    [
+      { file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "src/new_untracked.ts", line: 1, kind: "schema", ok: false, errors: ["entity: is missing"] },
+    ],
+    2,
+    1,
+  );
+  const report = inRepo(f, [], binary, { changed: true });
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.equal(report.summary.files, 2);
+  assert.ok(report.findings.some((f) => f.file === "src/new_untracked.ts"));
+});
+
+test("an untracked-only working tree selects the new spec instead of reporting nothing changed", () => {
+  // The branch's only spec change is a file git has never been told about.
+  // Before the untracked leg this was the loud-empty machinery firing a FALSE
+  // "nothing changed against <base>".
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/brand_new.ts"), GOOD_ANNOTATION);
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/brand_new.ts"]);
+  assert.deepEqual(
+    selection.stats,
+    { changed: 1, matches: 1, outsideRoot: 0, unreadable: 0, untracked: 1 },
+  );
+
+  const binary = stubBackend(
+    [{ file: "src/brand_new.ts", line: 1, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, [], binary, { changed: true });
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.ok(
+    !report.stderr.join("\n").includes("nothing changed against"),
+    `the false empty reason fired despite an untracked spec:\n${report.stderr.join("\n")}`,
+  );
+});
+
+test("a gitignored untracked spec is never selected — `--exclude-standard` is the boundary", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION, ".gitignore": "scratch/\n" });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.mkdirSync(path.join(f.root, "scratch"));
+  fs.writeFileSync(path.join(f.root, "scratch/ignored.ts"), BAD_ANNOTATION);
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, []);
+  // The gitignored file is not a changed-annotated count anywhere: git never
+  // offered it, so the union is empty and the loud-empty truth is exact.
+  assert.deepEqual(
+    selection.stats,
+    { changed: 0, matches: 0, outsideRoot: 0, unreadable: 0, untracked: 0 },
+  );
+});
+
+test("an untracked spec outside the current directory is counted outside, not checked", () => {
+  const f = initRepo({ "packages/app/src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "packages/app/src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.mkdirSync(path.join(f.root, "other"));
+  fs.writeFileSync(path.join(f.root, "other/untracked.ts"), GOOD_ANNOTATION);
+
+  // Running under packages/app: the untracked leg still lists repo-root
+  // paths (it runs at the toplevel), and the scoping rules apply uniformly.
+  const selection = selectFiles([], path.join(f.root, "packages/app"), { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  assert.deepEqual(
+    selection.stats,
+    { changed: 2, matches: 2, outsideRoot: 1, unreadable: 0, untracked: 0 },
+  );
+});
+
+test("an untracked spec is selected in a shallow clone too — the untracked leg needs no history", () => {
+  const f = initShallowClone({ "src/a.ts": GOOD_ANNOTATION });
+  fs.writeFileSync(path.join(f.root, "src/new_untracked.ts"), GOOD_ANNOTATION);
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/new_untracked.ts"]);
+  assert.deepEqual(
+    selection.stats,
+    { changed: 1, matches: 1, outsideRoot: 0, unreadable: 0, untracked: 1 },
+  );
+});
+
+test("stats.untracked pins both legs: zero for a tracked-only tree, exact for the untracked leg", () => {
+  // Tracked-only: the untracked leg contributed nothing and says so.
+  const tracked = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(tracked, "base");
+  git(tracked.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(tracked.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  const trackedSelection = selectFiles([], tracked.root, { changed: true });
+  assert.equal(trackedSelection.stats?.untracked, 0);
+
+  // Mixed: the untracked count names ONLY the files that arrived via the
+  // untracked leg, never the diff's.
+  const mixed = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(mixed, "base");
+  git(mixed.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(mixed.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(mixed.root, "src/new.ts"), GOOD_ANNOTATION);
+  fs.writeFileSync(path.join(mixed.root, "src/newer.ts"), GOOD_ANNOTATION);
+  const mixedSelection = selectFiles([], mixed.root, { changed: true });
+  assert.equal(mixedSelection.stats?.untracked, 2);
+  assert.equal(mixedSelection.stats?.changed, 3);
+});
+
+test("the checked-count clause says 'including N untracked' when the leg contributed, and never otherwise", () => {
+  // Mixed shape: the human line names the untracked provenance.
+  const mixed = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(mixed, "base");
+  git(mixed.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(mixed.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(mixed.root, "src/new_untracked.ts"), BAD_ANNOTATION);
+  const binary = stubBackend(
+    [{ file: "src/new_untracked.ts", line: 1, kind: "schema", ok: false, errors: ["entity: is missing"] }],
+    2,
+    1,
+  );
+  const mixedReport = inRepo(mixed, [], binary, { changed: true });
+  const human = renderHuman(mixedReport);
+  assert.match(human, /checked 2 source files changed since \S+ including 1 untracked/);
+
+  // `--json`'s selection block keeps its exact shape (mode, base, note) —
+  // the disclosure rides the human line, not a new document key.
+  const json = JSON.parse(renderJson(mixedReport)) as {
+    selection?: Record<string, unknown>;
+  };
+  assert.deepEqual(Object.keys(json.selection ?? {}), ["mode", "base", "note"]);
+
+  // Tracked-only tree: no clause at all — the line cannot over-claim.
+  const tracked = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(tracked, "base");
+  git(tracked.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(tracked.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  const trackedBinary = stubBackend(
+    [{ file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const trackedReport = inRepo(tracked, [], trackedBinary, { changed: true });
+  const trackedHuman = renderHuman(trackedReport);
+  assert.match(trackedHuman, /checked 1 source file changed since /);
+  assert.ok(!trackedHuman.includes("untracked"), `clause leaked on a tracked-only tree:\n${trackedHuman}`);
+
+  // Walk mode stays clause-free: the disclosure is `changed`-mode's own.
+  const walked = inRepo(tracked, [], trackedBinary);
+  assert.doesNotMatch(renderHuman(walked), /untracked/);
 });
 
 // ---------------------------------------------------------------------------

@@ -564,7 +564,16 @@ clean CI checkout and would exit green having checked nothing. Deleted paths
 are never selected; the selection is scoped to the current directory, matching
 the walk (`--changed` under `<repo>/packages/app` checks that package's
 changed files); `--changed=<base>` overrides the base for pipelines that know
-better. Outside a git repository, or with no resolvable base, the run is exit
+better. Selection also takes in **untracked** files: a brand-new file that has
+not been `git add`ed is part of what changed against the base, whether or not
+the change is committed yet. One `git ls-files --others --exclude-standard`
+call per run is unioned with the diff — `.gitignore`d paths (scratch
+directories, vendored code, build output) never enter the selection — and
+untracked files obey the same scoping as diffed ones, so an untracked file
+outside the current directory is counted as outside, not checked. When the
+untracked leg contributed, the `checked N source files changed since <base>`
+line says `including M untracked`. Outside a git repository, or with no
+resolvable base, the run is exit
 2; when no default-branch ref exists the diff falls back to HEAD (uncommitted
 work only) and says so on stderr. In a **shallow** checkout — the default
 depth-1 `git clone` behind `actions/checkout@v4` — the merge base with the
@@ -576,7 +585,8 @@ checkout contains. An explicit `--changed=<base>` that is not in a shallow
 checkout's history is exit 2 with that cause and the same remedy, not the bare
 "could not diff against" a full clone reports for a genuinely bad ref. A
 selection that comes up empty stays exit
-0 and says WHY on stderr — nothing changed against the base, nothing matched
+0 and says WHY on stderr — nothing changed against the base (no tracked
+change and no untracked annotated file), nothing matched
 the annotated extensions, or everything that matched is outside the current
 directory — so "checked nothing" can never read as "checked N files, found
 nothing". `--changed` cannot be combined with named files (exit 2). A

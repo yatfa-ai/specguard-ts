@@ -79,7 +79,10 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
     stdout.write(
       "\n  --changed[=<base>]  check only files changed against <base> (default: the\n" +
         "                      merge base with the default branch; never a bare\n" +
-        "                      working-tree-vs-index diff, which is empty in CI)\n",
+        "                      working-tree-vs-index diff, which is empty in CI).\n" +
+        "                      Untracked files are selected too, so a brand-new\n" +
+        "                      file that has not been git-added is still checked;\n" +
+        "                      gitignored paths never are\n",
     );
     stdout.write("\nExit codes: 0 clean (including zero annotations), 1 malformed annotations, 2 could not lint.\n");
     return 0;
