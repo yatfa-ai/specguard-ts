@@ -365,18 +365,21 @@ function capture(): { lines: string[]; stream: NodeJS.WriteStream } {
  * Runs the CLI entry point itself (not lint()) inside the fixture, with the
  * validator override scrubbed from the real environment so the no-binary arm
  * is what resolves — the CLI reads process.env, so the scrub is the only way
- * to make that deterministic.
+ * to make that deterministic. Pass `bin` (a stubBackend path) to run against
+ * a working backend instead: the variable is SET rather than scrubbed.
  */
 function runCliInRepo(
   fixture: Fixture,
   argv: string[],
   dir: string = fixture.root,
+  bin?: string,
 ): { exit: number; stdout: string; stderr: string } {
   const out = capture();
   const err = capture();
   const previousCwd = process.cwd();
   const previousOverride = process.env[VALIDATE_INTENT_ENV_VAR];
-  delete process.env[VALIDATE_INTENT_ENV_VAR];
+  if (bin === undefined) delete process.env[VALIDATE_INTENT_ENV_VAR];
+  else process.env[VALIDATE_INTENT_ENV_VAR] = bin;
   process.chdir(dir);
   try {
     const exit = runCli(argv, out.stream, err.stream);
@@ -937,6 +940,127 @@ test("the changed-mode name union is built size-safely — it must hold where sp
     name: untrackedLeg[untrackedLeg.length - 1],
     untracked: true,
   });
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-1144: the selection sentence under `--json`. The provenance line the
+// human report writes was constructed inside renderHuman only, so a json-mode
+// `--changed` run named its selection nowhere a machine can read: the document
+// carries `{mode, base, note}` only and the run's stderr was empty. The
+// specguard-mcp bridge passes `--json` unconditionally and forwards stderr
+// verbatim as `linter_stderr`, so the sentence branches by STREAM, not by
+// content: one builder (`provenanceLine`) renders it for both renderers —
+// the human report keeps stdout byte-identical, json mode reads the same
+// bytes on stderr.
+// ---------------------------------------------------------------------------
+
+/** The mixed tree all three SPGD-1144 pins run over: one tracked-and-modified
+ * spec plus one never-`git add`ed spec — the untracked leg demonstrably
+ * contributing to the selection. */
+function mixedTreeFixture(untrackedBody: string): Fixture {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(f.root, "src/new_untracked.ts"), untrackedBody);
+  return f;
+}
+
+test("a json-mode --changed run over a mixed tree carries the selection sentence on stderr; stdout stays one clean document", () => {
+  const f = mixedTreeFixture(GOOD_ANNOTATION);
+  const binary = stubBackend(
+    [
+      { file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "src/new_untracked.ts", line: 1, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const cli = runCliInRepo(f, ["lint", "--changed", "--json"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+
+  // The sentence on stderr, byte-exact, as the stream's LAST line — the order
+  // the Ruby twin prints on its json stderr (provenance line, then sentence).
+  const base = git(f.root, "merge-base", "HEAD", "main").trim();
+  const sentence =
+    `specguard lint: checked 2 source files changed since ${base} including 1 untracked`;
+  const errLines = cli.stderr.trimEnd().split("\n");
+  assert.equal(errLines[errLines.length - 1], sentence);
+  // Exactly one checked line reaches stderr — the sentence itself; the
+  // provenance line names no count and no warning fires (note is null here).
+  assert.equal(errLines.filter((l) => l.startsWith("specguard lint: checked")).length, 1);
+
+  // stdout stays exactly one JSON document carrying no `checked` prose.
+  const json = JSON.parse(cli.stdout) as {
+    summary: { files: number };
+    selection?: { mode: string };
+  };
+  assert.equal(json.summary.files, 2);
+  assert.equal(json.selection?.mode, "changed");
+  assert.ok(
+    !cli.stdout.includes("checked"),
+    `human prose leaked into the json stdout:\n${cli.stdout}`,
+  );
+
+  // Walk mode emits nothing: the sentence is `changed` mode's own disclosure
+  // (the mode clause of the emission guard), in human and json alike.
+  const walked = runCliInRepo(f, ["lint", "--json"], f.root, binary);
+  assert.equal(walked.exit, EXIT_OK);
+  assert.ok(
+    !walked.stderr.includes("specguard lint: checked"),
+    `the sentence leaked into a walk-mode json stderr:\n${walked.stderr}`,
+  );
+});
+
+test("a json-mode --changed run with a malformed annotation: exit 1 and the sentence still rides stderr", () => {
+  const f = mixedTreeFixture(BAD_ANNOTATION);
+  const binary = stubBackend(
+    [
+      { file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "src/new_untracked.ts", line: 1, kind: "schema", ok: false, errors: ["entity: is missing"] },
+    ],
+    2,
+    1,
+  );
+  const cli = runCliInRepo(f, ["lint", "--changed", "--json"], f.root, binary);
+  assert.equal(cli.exit, EXIT_MALFORMED);
+  const base = git(f.root, "merge-base", "HEAD", "main").trim();
+  assert.match(
+    cli.stderr,
+    new RegExp(`checked 2 source files changed since ${base} including 1 untracked`),
+  );
+  // An exit-1 run still emits its document — and the document carries no
+  // `checked` prose; the sentence's home is stderr alone.
+  const json = JSON.parse(cli.stdout) as { ok: boolean };
+  assert.equal(json.ok, false);
+  assert.ok(!cli.stdout.includes("checked"));
+});
+
+test("human mode keeps the sentence as stdout's first line, byte-identical, and stderr carries no checked line", () => {
+  const f = mixedTreeFixture(GOOD_ANNOTATION);
+  const binary = stubBackend(
+    [
+      { file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "src/new_untracked.ts", line: 1, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const cli = runCliInRepo(f, ["lint", "--changed"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+  // Byte-equality of the sentence: the extracted builder's output is the
+  // human report's first line exactly as it was before the extraction.
+  const base = git(f.root, "merge-base", "HEAD", "main").trim();
+  assert.ok(
+    cli.stdout.startsWith(
+      `specguard lint: checked 2 source files changed since ${base} including 1 untracked\n`,
+    ),
+    `the human first line changed:\n${cli.stdout.split("\n")[0]}`,
+  );
+  // Human mode does NOT move the sentence to stderr: it is stdout's line
+  // there; stderr carries the linter's own diagnostics only.
+  assert.ok(
+    !cli.stderr.includes("checked"),
+    `a checked line leaked into human-mode stderr:\n${cli.stderr}`,
+  );
 });
 
 // ---------------------------------------------------------------------------

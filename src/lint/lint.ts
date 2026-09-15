@@ -12,6 +12,7 @@ import {
   type FileSelection,
 } from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
+import { provenanceLine } from "./report.js";
 
 /**
  * `specguard lint` orchestration: discovery → binary validation → verdict.
@@ -164,6 +165,24 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       ? [`specguard lint: warning: ${selection.note}`]
       : [];
 
+  // SPGD-1144: under `--json` the human report never renders, so the
+  // selection sentence would be constructed by no code path at all — a
+  // non-empty changed run's stderr was empty and its selection (the base
+  // actually diffed against, the untracked leg's contribution) named nowhere
+  // a machine can read. The provenance bridge forwards stderr verbatim as
+  // `linter_stderr`, so in json mode the SAME bytes the human report reads
+  // ride stderr beside the note warnings. The guard mirrors the document's
+  // own disclosure (renderJson: changed mode with a resolved base) plus a
+  // non-empty selection; walk/explicit runs emit nothing and the loud empty
+  // arm below stays exactly as it is.
+  const jsonProvenance =
+    options.json === true &&
+    selection.mode === "changed" &&
+    selection.base !== null &&
+    selection.files.length > 0
+      ? [provenanceLine(selection.files.length, selection)]
+      : [];
+
   const scans = scanTokens(selection.files);
   const tokenCount = scans.reduce((sum, scan) => sum + scan.tokens, 0);
   // SPGD-926: `scanTokens` launders an unreadable or oversized file into
@@ -229,6 +248,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         stderr: [
           ...noteLines,
           `specguard lint: warning: no annotations found in ${selection.files.length} file(s); the validator backend was not needed (${resolution.code})`,
+          ...jsonProvenance,
         ],
         selection,
       };
@@ -256,6 +276,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         stderr: [
           ...noteLines,
           `specguard lint: error: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
+          ...jsonProvenance,
         ],
         selection,
       };
@@ -278,6 +299,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       stderr: [
         ...noteLines,
         `specguard lint: error: ${tokenCount} @intent: annotation token(s) found but no validator backend could be resolved: ${resolution.reason}`,
+        ...jsonProvenance,
       ],
       selection,
     };
@@ -288,6 +310,10 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
     ...noteLines,
     `specguard lint: validated by ${resolution.path}` +
       (resolution.identity !== null ? ` (${resolution.identity})` : ""),
+    // The selection sentence comes last — the order the Ruby twin prints on
+    // its stderr in json mode (provenance line, then the sentence), so a
+    // consumer reading either backend's stream reads the same sequence.
+    ...jsonProvenance,
   ];
 
   let raw: ValidatorFinding[];

@@ -1,21 +1,34 @@
 import type { LintReport } from "./lint.js";
+import type { FileSelection } from "./discover.js";
 
 /**
  * Two renderers over ONE report, mirroring the Ruby client's `--json`
  * decision: `--json` replaces the stdout report; it never touches the exit
- * code (already decided in lint.ts) or stderr (diagnostics about the linter,
- * not findings). No exit-2 path emits a document — a run that checked
- * nothing must not dress "could not check" as structure.
+ * code (already decided in lint.ts). The renderers write no stderr of their
+ * own — diagnostics about the linter live there (SPGD-247) — but the
+ * selection sentence is BOTH renderers' line, one stream each (SPGD-1144):
+ * the human report reads it on stdout, json mode carries the same bytes on
+ * stderr (emitted by lint.ts, beside the note warnings) so the selection
+ * stays machine-verifiable. No exit-2 path emits a document — a run that
+ * checked nothing must not dress "could not check" as structure.
  */
 
 function location(f: { file: string; line: number | null }): string {
   return f.line !== null ? `${f.file}:${f.line}` : f.file;
 }
 
-/** The human-readable stdout report. */
-export function renderHuman(report: LintReport): string {
-  const lines: string[] = [];
-  const selection = report.selection;
+/**
+ * The provenance sentence for a run's file count, built at exactly one site
+ * and written by both renderers — only the stream differs (SPGD-1144). The
+ * human report reads it as its first stdout line; under `--json` the document
+ * REPLACES the human report, so the sentence would be constructed by no code
+ * path at all, and lint.ts carries the same bytes on stderr instead — where
+ * the linter's own diagnostics already live, and which the bridge forwards
+ * verbatim as `linter_stderr`. One builder is what makes "the machine reads
+ * the provenance the human does" a property of the code rather than a
+ * promise two copies could drift apart on.
+ */
+export function provenanceLine(files: number, selection: FileSelection | null): string {
   const changedSince =
     selection?.mode === "changed" && selection.base !== null
       ? ` changed since ${selection.base}`
@@ -30,10 +43,15 @@ export function renderHuman(report: LintReport): string {
     selection?.mode === "changed" && (selection.stats?.untracked ?? 0) > 0
       ? ` including ${selection.stats?.untracked} untracked`
       : "";
-  lines.push(
-    `specguard lint: checked ${report.summary.files} source file${report.summary.files === 1 ? "" : "s"}` +
-      changedSince + untrackedClause,
+  return (
+    `specguard lint: checked ${files} source file${files === 1 ? "" : "s"}` +
+    changedSince + untrackedClause
   );
+}
+
+/** The human-readable stdout report. */
+export function renderHuman(report: LintReport): string {
+  const lines: string[] = [provenanceLine(report.summary.files, report.selection)];
 
   for (const finding of report.findings) {
     if (finding.ok) continue; // passing annotations are counted, not listed
