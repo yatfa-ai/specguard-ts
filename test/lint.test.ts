@@ -1064,6 +1064,210 @@ test("human mode keeps the sentence as stdout's first line, byte-identical, and 
 });
 
 // ---------------------------------------------------------------------------
+// SPGD-1161: the zero-annotation coverage note. `specguard lint` had the
+// blind spot its Ruby twin cured (SPGD-1159): a file that was read, reached
+// the binary, and carries no `@intent` annotation is named NOWHERE — the
+// human summary line interpolates the annotation COUNT and the json document
+// carries findings only, so "every checked file annotated and valid" is
+// byte-identical to "half the checked files carry nothing". The note composes
+// into the report's `stderr` array — which cli.ts writes to stderr BEFORE
+// rendering, so one composition reaches both renderers — as
+// `specguard lint: note: N of M checked source file(s) carry/carries no
+// @intent annotations: <files>`, a set-difference of `selection.files` minus
+// the annotation-site findings (valid OR malformed: a malformed annotation IS
+// an annotation site). The prefix deliberately avoids `specguard lint:
+// checked`, which the selection-sentence pins count; and the note composes
+// BEFORE `jsonProvenance` so the selection sentence stays the stream's LAST
+// line in every mode (the byte-exact SPGD-1144 pin). A file-shaped failure
+// (`read` / `no-match`) never reaches the composition site — its exit-2 arm
+// returns first — and zero output changes when every checked file carries an
+// annotation.
+// ---------------------------------------------------------------------------
+
+/** The stub findings for one annotation site on `file`, plus its count. */
+function siteFinding(file: string, kind: string | null, ok: boolean): unknown[] {
+  return [{ file, line: 1, kind, ok, errors: ok ? [] : ["entity: is missing"] }];
+}
+
+test("a mixed selection names exactly the bare file(s) on stderr in human mode, and none that is annotated", () => {
+  const f = makeRepo({
+    "annotated.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});",
+    "bare.test.ts": "it('y', () => {});\n",
+  });
+  const binary = stubBackend(siteFinding("annotated.test.ts", null, true), 1);
+  const cli = runCliInRepo(f, ["lint", "annotated.test.ts", "bare.test.ts"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.ok(
+    cli.stderr.includes(
+      "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: bare.test.ts",
+    ),
+    `the note naming the bare file is missing:\n${cli.stderr}`,
+  );
+  assert.ok(
+    !cli.stderr.includes("annotated.test.ts"),
+    `the annotated file was named:\n${cli.stderr}`,
+  );
+  // Human STDOUT is untouched: the note's home is stderr alone (the summary
+  // line still interpolates the count, never the files).
+  assert.ok(!cli.stdout.includes("no @intent annotations"));
+});
+
+test("a mixed selection names them on stderr in json mode too, leaving the document untouched", () => {
+  const f = makeRepo({
+    "annotated.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});",
+    "bare.test.ts": "it('y', () => {});\n",
+  });
+  const binary = stubBackend(siteFinding("annotated.test.ts", null, true), 1);
+  const cli = runCliInRepo(
+    f,
+    ["lint", "--json", "annotated.test.ts", "bare.test.ts"],
+    f.root,
+    binary,
+  );
+  assert.equal(cli.exit, EXIT_OK);
+  assert.ok(
+    cli.stderr.includes(
+      "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: bare.test.ts",
+    ),
+    `the note naming the bare file is missing:\n${cli.stderr}`,
+  );
+  // The json document's key set and shape are byte-identical to today
+  // (the SPGD-858 parity fence: no document key — stderr is the channel).
+  const json = JSON.parse(cli.stdout) as {
+    mode: string;
+    ok: boolean;
+    backend: unknown;
+    summary: Record<string, unknown>;
+    findings: { file: string }[];
+  };
+  assert.deepEqual(Object.keys(json), ["mode", "ok", "backend", "summary", "findings"]);
+  assert.deepEqual(json.summary, { files: 2, annotations: 1, malformed: 0, unreadable: 0 });
+  assert.deepEqual(
+    json.findings.map((x) => x.file),
+    ["annotated.test.ts"],
+  );
+  assert.ok(!cli.stdout.includes("no @intent annotations"));
+});
+
+test("several bare files are named together, plural verb, in selection order", () => {
+  const f = makeRepo({
+    "a.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});",
+    "b.test.ts": "it('y', () => {});\n",
+    "c.test.ts": "it('z', () => {});\n",
+  });
+  const binary = stubBackend(siteFinding("a.test.ts", null, true), 1);
+  const report = inRepo(f, ["a.test.ts", "b.test.ts", "c.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(
+    report.stderr,
+    [
+      `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`,
+      "specguard lint: note: 2 of 3 checked source files carry no @intent annotations: b.test.ts, c.test.ts",
+    ],
+  );
+});
+
+test("a fully annotated selection emits no note — stderr is byte-identical to today in both modes", () => {
+  const f = makeRepo({
+    "first.test.ts": GOOD_ANNOTATION + "\nit('x', () => {});",
+    "second.test.ts": GOOD_ANNOTATION + "\nit('y', () => {});",
+  });
+  const binary = stubBackend(
+    [
+      { file: "first.test.ts", line: 1, kind: null, ok: true, errors: [] },
+      { file: "second.test.ts", line: 1, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const validatedBy = `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`;
+  // Human mode: stderr is exactly the validated-by line, as before.
+  const report = inRepo(f, ["first.test.ts", "second.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(report.stderr, [validatedBy]);
+  assert.ok(!renderHuman(report).includes("note:"));
+  // Json mode: the same single stderr line; the document unchanged.
+  const cli = runCliInRepo(f, ["lint", "--json", "first.test.ts", "second.test.ts"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.equal(cli.stderr, `${validatedBy}\n`);
+  const json = JSON.parse(cli.stdout) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(json), ["mode", "ok", "backend", "summary", "findings"]);
+});
+
+test("the note composes before the json provenance sentence, which stays the stream's LAST line", () => {
+  // Changed mode, json: the ordering constraint the SPGD-1144 byte pin
+  // fixed. Mixed tree — the tracked spec is annotated, the untracked one
+  // carries nothing — so the note has something to name. The tracked change
+  // is COMMITTED so HEAD moves past the merge base: a clean-derived base
+  // keeps the thin-base warning out of the stream and the ordering exact.
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  commitAll(f, "touch a.ts");
+  fs.writeFileSync(path.join(f.root, "src/new_untracked.ts"), "const bare = true;\n");
+  const binary = stubBackend(siteFinding("src/a.ts", null, true), 1);
+  const cli = runCliInRepo(f, ["lint", "--changed", "--json"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+  const errLines = cli.stderr.trimEnd().split("\n");
+  const base = git(f.root, "merge-base", "HEAD", "main").trim();
+  assert.equal(
+    errLines[errLines.length - 1],
+    `specguard lint: checked 2 source files changed since ${base} including 1 untracked`,
+  );
+  assert.equal(
+    errLines[1],
+    "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: src/new_untracked.ts",
+  );
+  // Walk mode, human: no provenance sentence exists there, and the note is
+  // still exactly one line.
+  const walked = runCliInRepo(f, ["lint", "--changed"], f.root, binary);
+  assert.equal(walked.exit, EXIT_OK);
+  const humanErrLines = walked.stderr.trimEnd().split("\n");
+  assert.equal(humanErrLines.length, 2);
+  assert.match(humanErrLines[1]!, /^specguard lint: note: 1 of 2 checked source files carries/);
+});
+
+test("a malformed-annotated file is never named bare — its annotation site subtracts it", () => {
+  const f = makeRepo({
+    "malformed.test.ts": BAD_ANNOTATION + "\nit('x', () => {});",
+    "bare.test.ts": "it('y', () => {});\n",
+  });
+  const binary = stubBackend(siteFinding("malformed.test.ts", "schema", false), 1);
+  const report = inRepo(f, ["malformed.test.ts", "bare.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  // Exit 1 still reports: the note composes on the normal-path return, and
+  // the malformed file is an annotation site, not a bare one.
+  const noteLines = report.stderr.filter((l) => l.startsWith("specguard lint: note:"));
+  assert.deepEqual(noteLines, [
+    "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: bare.test.ts",
+  ]);
+  // The malformed file's name appears on no stderr line at all: it is
+  // subtracted from the set by its own annotation-site finding.
+  assert.ok(!report.stderr.join("\n").includes("malformed.test.ts"));
+});
+
+test("a file-shaped read failure is never named by the note; its exit-2 arm and error line pass unedited", () => {
+  const f = makeRepo({ "bare.test.ts": "it('y', () => {});\n" });
+  const binary = stubBackend(
+    [{ file: "gone.test.ts", kind: "no-match", ok: false, errors: ["no file(s) match"] }],
+    0,
+  );
+  const report = inRepo(f, ["bare.test.ts", "gone.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  // The unread arm's own reporter, byte-identical to today...
+  assert.ok(
+    report.stderr.includes("specguard lint: error: 1 file(s) could not be read: gone.test.ts"),
+    `the unread error line changed:\n${report.stderr.join("\n")}`,
+  );
+  // ...and NO note composes on that arm — the run could not look inside one
+  // of its files, so no coverage claim is made about either.
+  assert.ok(
+    !report.stderr.join("\n").includes("no @intent annotations"),
+    `a note fired beside a read failure:\n${report.stderr.join("\n")}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // SPGD-1027: shallow checkouts. A depth-1 CI clone (the actions/checkout@v4
 // default) cannot answer the merge-base question — the merge base with the
 // default branch is not in its history — so the derived base is HEAD itself,

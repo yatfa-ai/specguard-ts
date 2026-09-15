@@ -306,14 +306,17 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   }
 
   const backend = { path: resolution.path, identity: resolution.identity };
-  const stderr = [
+  // The stderr lines that exist before the backend runs. `jsonProvenance` is
+  // appended at the return sites below, LAST: the selection sentence stays
+  // the stream's final line — the order the Ruby twin prints on its json
+  // stderr (provenance line, then the sentence), so a consumer reading
+  // either backend's stream reads the same sequence. Splitting the head from
+  // the provenance is what lets the coverage note below land between them
+  // without moving the sentence.
+  const stderrHead = [
     ...noteLines,
     `specguard lint: validated by ${resolution.path}` +
       (resolution.identity !== null ? ` (${resolution.identity})` : ""),
-    // The selection sentence comes last — the order the Ruby twin prints on
-    // its stderr in json mode (provenance line, then the sentence), so a
-    // consumer reading either backend's stream reads the same sequence.
-    ...jsonProvenance,
   ];
 
   let raw: ValidatorFinding[];
@@ -353,12 +356,46 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       summary: { files: selection.files.length, annotations, malformed, unreadable },
       findings,
       stderr: [
-        ...stderr,
+        ...stderrHead,
+        ...jsonProvenance,
         `specguard lint: error: ${unreadable} file(s) could not be read: ${named.join(", ")}`,
       ],
       selection,
     };
   }
+
+  // SPGD-1161: which of the checked files were read and yielded no `@intent`
+  // annotation at all. Zero findings (or an empty `findings` list in the
+  // document) is otherwise ambiguous between "every checked file was
+  // annotated and valid" and "half the checked files carry nothing" — and
+  // the missing-annotation question is the most actionable one this tool
+  // touches, because the bridge agent reading `linter_stderr` has no other
+  // view into the repository's source files. The specguard-ts mirror of the
+  // landed Ruby contract (`report_zero_annotation_files`, SPGD-1159).
+  //
+  // The boundary is the set-difference the findings list already supports:
+  // a file counts as covered when it yielded any annotation-site finding —
+  // valid OR malformed (a malformed annotation IS an annotation site, so a
+  // malformed-annotated file is not bare). A file-shaped failure (`read` /
+  // `no-match`) never reaches this site: the `unreadable > 0` arm above
+  // returns first with its own reporters, mirroring the Ruby unread
+  // boundary — an unread file is NOT a zero-annotation file.
+  //
+  // It is a NOTE on stderr, never a warning and never an exit code: "lint,
+  // don't require" (SPGD-12 §1) keeps a missing annotation a non-error. It
+  // is composed into the report's stderr array — which cli.ts writes to
+  // stderr before rendering either output — so both renderers get it, and
+  // it lands BEFORE `jsonProvenance` so the selection sentence stays the
+  // stream's last line. The prefix is deliberately not `specguard lint:
+  // checked`, which the selection-sentence pins count.
+  const annotated = new Set(
+    findings.filter((f) => !f.aboutFile).map((f) => f.file),
+  );
+  const bare = selection.files.filter((file) => !annotated.has(file));
+  const coverageNote =
+    bare.length === 0
+      ? null
+      : `specguard lint: note: ${bare.length} of ${selection.files.length} checked source file${selection.files.length === 1 ? "" : "s"} ${bare.length === 1 ? "carries" : "carry"} no @intent annotations: ${bare.join(", ")}`;
 
   return {
     ok: malformed === 0,
@@ -367,7 +404,11 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
     backendNote: null,
     summary: { files: selection.files.length, annotations, malformed, unreadable },
     findings,
-    stderr,
+    stderr: [
+      ...stderrHead,
+      ...(coverageNote === null ? [] : [coverageNote]),
+      ...jsonProvenance,
+    ],
     selection,
   };
 }
