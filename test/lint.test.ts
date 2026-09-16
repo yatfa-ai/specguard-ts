@@ -1267,6 +1267,53 @@ test("a file-shaped read failure is never named by the note; its exit-2 arm and 
   );
 });
 
+// SPGD-1165: the singular arm of the note's pluralization, pinned byte-exact.
+// The line's pluralization contract is two ternaries keyed on DIFFERENT
+// sizes (lint.ts): the NOUN keys on the selection's TOTAL size
+// (`file${selection.files.length === 1 ? "" : "s"}`), the VERB on the bare
+// count (`${bare.length === 1 ? "carries" : "carry"}`). Every landed pin
+// above selects at least two files, so the singular-noun arm — `1 of 1
+// checked source file carries` — was machine-observable contract pinned
+// nowhere: dropping the noun ternary left this suite all green while
+// flipping the verb ternary turned four landed pins red (both directions
+// measured on the base tree). These two pins select exactly ONE file so
+// both arms render in their singular form, and hold the line exact-equal.
+
+test("a one-file selection whose only file is bare names it with the singular noun and verb, byte-exact", () => {
+  const f = makeRepo({ "bare.test.ts": "it('y', () => {});\n" });
+  const binary = stubBackend([], 0);
+  const report = inRepo(f, ["bare.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(report.stderr, [
+    `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`,
+    "specguard lint: note: 1 of 1 checked source file carries no @intent annotations: bare.test.ts",
+  ]);
+});
+
+test("a one-file selection renders the singular note on stderr in json mode, the document's zero-annotation shape intact", () => {
+  const f = makeRepo({ "bare.test.ts": "it('y', () => {});\n" });
+  const binary = stubBackend([], 0);
+  const cli = runCliInRepo(f, ["lint", "--json", "bare.test.ts"], f.root, binary);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.equal(
+    cli.stderr,
+    `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})\n` +
+      "specguard lint: note: 1 of 1 checked source file carries no @intent annotations: bare.test.ts\n",
+  );
+  // The json document keeps its one-file zero-annotation shape, asserted
+  // with deepEqual exactly as the landed mixed-json pin does (the SPGD-858
+  // parity fence: the note lives on stderr; no document key moves).
+  const json = JSON.parse(cli.stdout) as {
+    ok: boolean;
+    summary: Record<string, unknown>;
+    findings: unknown[];
+  };
+  assert.deepEqual(Object.keys(json), ["mode", "ok", "backend", "summary", "findings"]);
+  assert.equal(json.ok, true);
+  assert.deepEqual(json.summary, { files: 1, annotations: 0, malformed: 0, unreadable: 0 });
+  assert.deepEqual(json.findings, []);
+});
+
 // ---------------------------------------------------------------------------
 // SPGD-1027: shallow checkouts. A depth-1 CI clone (the actions/checkout@v4
 // default) cannot answer the merge-base question — the merge base with the
