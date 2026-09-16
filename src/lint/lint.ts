@@ -338,7 +338,8 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
 
   const findings: LintFinding[] = raw.map((f) => ({ ...f, aboutFile: aboutFile(f.kind) }));
   const malformed = findings.filter((f) => !f.aboutFile && !f.ok).length;
-  const unreadable = findings.filter((f) => f.aboutFile && !f.ok).length;
+  const unreadFindings = findings.filter((f) => f.aboutFile && !f.ok);
+  const unreadable = unreadFindings.length;
   const annotations = findings.filter((f) => !f.aboutFile).length;
 
   // SPGD-1161: which of the checked files were read and yielded no `@intent`
@@ -376,9 +377,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   const annotated = new Set(
     findings.filter((f) => !f.aboutFile).map((f) => f.file),
   );
-  const unreadFiles = new Set(
-    findings.filter((f) => f.aboutFile && !f.ok).map((f) => f.file),
-  );
+  const unreadFiles = new Set(unreadFindings.map((f) => f.file));
   const bare = selection.files.filter(
     (file) => !annotated.has(file) && !unreadFiles.has(file),
   );
@@ -391,9 +390,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
     // A file that could not be read is "could not do its job" — exit 2 —
     // never a borrowed exit 1: the contract spends 1 on malformed
     // annotations only.
-    const named = findings
-      .filter((f) => f.aboutFile && !f.ok)
-      .map((f) => f.file);
+    const named = unreadFindings.map((f) => f.file);
     return {
       ok: false,
       exitCode: EXIT_MISUSE,
