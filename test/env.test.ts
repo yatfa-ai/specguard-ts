@@ -53,6 +53,53 @@ test("empty-string variables are treated as unset", () => {
   assert.equal(e.ciRunId, null);
 });
 
+test("each provider branch variable resolves through readRunnerEnv", () => {
+  // The full list the Ruby client reads (its BRANCH_KEYS), so a TS suite on
+  // CircleCI, Buildkite, Jenkins or a GitLab merge-request pipeline keeps its
+  // branch attribution even though those providers check out in DETACHED HEAD
+  // and the `git branch --show-current` fallback returns empty there.
+  for (const [name, value] of [
+    ["SPECGUARD_BRANCH", "feature/local"],
+    ["GITHUB_REF_NAME", "feature/github"],
+    ["CI_COMMIT_REF_NAME", "feature/gitlab-mr"],
+    ["CI_COMMIT_BRANCH", "feature/gitlab-branch"],
+    ["CIRCLE_BRANCH", "feature/circleci"],
+    ["BUILDKITE_BRANCH", "feature/buildkite"],
+    ["GIT_BRANCH", "origin/feature/jenkins"],
+  ] as const) {
+    const e = readRunnerEnv({
+      env: envWith({ SPECGUARD_COMMIT_SHA: "abc", [name]: value }),
+    });
+    assert.equal(e.branch, value, `${name} must resolve for branch`);
+  }
+});
+
+test("SPECGUARD_BRANCH wins over the provider branch variables", () => {
+  const e = readRunnerEnv({
+    env: envWith({
+      SPECGUARD_COMMIT_SHA: "abc",
+      SPECGUARD_BRANCH: "mine",
+      GITHUB_REF_NAME: "theirs",
+      CIRCLE_BRANCH: "also-theirs",
+    }),
+  });
+  assert.equal(e.branch, "mine");
+});
+
+test("CI_COMMIT_REF_NAME resolves before CI_COMMIT_BRANCH", () => {
+  // GitLab sets CI_COMMIT_REF_NAME on merge-request pipelines, where
+  // CI_COMMIT_BRANCH is unset; on branch pipelines both carry the branch.
+  // The ref name is first so an MR pipeline keeps its branch either way.
+  const e = readRunnerEnv({
+    env: envWith({
+      SPECGUARD_COMMIT_SHA: "abc",
+      CI_COMMIT_REF_NAME: "feature/mr",
+      CI_COMMIT_BRANCH: "feature/branch",
+    }),
+  });
+  assert.equal(e.branch, "feature/mr");
+});
+
 test("SPECGUARD_TIMEOUT is seconds; default is 10s; garbage falls back to 10s", () => {
   assert.equal(
     readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_TIMEOUT: "2" }) }).timeoutMs,

@@ -458,7 +458,7 @@ them.
 | Field | Type | Rule |
 | --- | --- | --- |
 | `commit_sha` | string | **required**, non-empty. `SPECGUARD_COMMIT_SHA`, `GITHUB_SHA`, `CI_COMMIT_SHA`, `CIRCLE_SHA1`, `BUILDKITE_COMMIT`, `GIT_COMMIT`, else `git rev-parse HEAD` |
-| `branch` | string \| null | null on a detached checkout |
+| `branch` | string \| null | `SPECGUARD_BRANCH` if you set it, else `GITHUB_REF_NAME`, `CI_COMMIT_REF_NAME`, `CI_COMMIT_BRANCH`, `CIRCLE_BRANCH`, `BUILDKITE_BRANCH`, `GIT_BRANCH`, else `git branch --show-current` — null on a detached checkout |
 | `ci_run_id` | string \| null | **string, never a number** |
 | `shard_id` | string \| null | **string, never a number** |
 | `duration_seconds` | number \| null | non-negative |
