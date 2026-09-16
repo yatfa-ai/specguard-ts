@@ -75,7 +75,11 @@ export function readRunnerEnv(
     firstEnv(env, [
       "SPECGUARD_BRANCH",
       "GITHUB_REF_NAME",
+      "CI_COMMIT_REF_NAME",
       "CI_COMMIT_BRANCH",
+      "CIRCLE_BRANCH",
+      "BUILDKITE_BRANCH",
+      "GIT_BRANCH",
     ]) ?? git(env, ["branch", "--show-current"]);
 
   const ciRunIdRaw = firstEnv(env, [
