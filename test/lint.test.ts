@@ -1074,14 +1074,20 @@ test("human mode keeps the sentence as stdout's first line, byte-identical, and 
 // rendering, so one composition reaches both renderers — as
 // `specguard lint: note: N of M checked source file(s) carry/carries no
 // @intent annotations: <files>`, a set-difference of `selection.files` minus
-// the annotation-site findings (valid OR malformed: a malformed annotation IS
-// an annotation site). The prefix deliberately avoids `specguard lint:
+// BOTH the annotation-site findings (valid OR malformed: a malformed
+// annotation IS an annotation site) AND the file-shaped-failure files
+// (`read` / `no-match` — the run could not look inside them, and naming them
+// annotation-free would overstate: an unread file is NOT a zero-annotation
+// file). The prefix deliberately avoids `specguard lint:
 // checked`, which the selection-sentence pins count; and the note composes
 // BEFORE `jsonProvenance` so the selection sentence stays the stream's LAST
 // line in every mode (the byte-exact SPGD-1144 pin). A file-shaped failure
-// (`read` / `no-match`) never reaches the composition site — its exit-2 arm
-// returns first — and zero output changes when every checked file carries an
-// annotation.
+// does NOT suppress the note — SPGD-1167 hoisted the composition above the
+// exit-2 arm: the composition precedes the arm, and the arm composes the
+// note between `stderrHead` and `jsonProvenance`, beside its error line, so
+// a bare file checked alongside an unreadable one is named while an
+// unreadable-only run still emits none (nothing bare to name) — and zero
+// output changes when every checked file carries an annotation.
 // ---------------------------------------------------------------------------
 
 /** The stub findings for one annotation site on `file`, plus its count. */
