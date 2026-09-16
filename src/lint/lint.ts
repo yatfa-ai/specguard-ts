@@ -341,6 +341,52 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   const unreadable = findings.filter((f) => f.aboutFile && !f.ok).length;
   const annotations = findings.filter((f) => !f.aboutFile).length;
 
+  // SPGD-1161: which of the checked files were read and yielded no `@intent`
+  // annotation at all. Zero findings (or an empty `findings` list in the
+  // document) is otherwise ambiguous between "every checked file was
+  // annotated and valid" and "half the checked files carry nothing" — and
+  // the missing-annotation question is the most actionable one this tool
+  // touches, because the bridge agent reading `linter_stderr` has no other
+  // view into the repository's source files. The specguard-ts mirror of the
+  // landed Ruby contract (`report_zero_annotation_files`, SPGD-1159).
+  //
+  // The boundary is the set-difference the findings list already supports:
+  // a file counts as covered when it yielded any annotation-site finding —
+  // valid OR malformed (a malformed annotation IS an annotation site, so a
+  // malformed-annotated file is not bare). A file-shaped failure (`read` /
+  // `no-match`) is NOT a zero-annotation file either: the run could not look
+  // inside it, and naming it annotation-free would overstate exactly the way
+  // the unread clause refuses to (the Ruby note's own @intent: an unread
+  // file is never named by the note, which keeps naming the bare file it was
+  // checked alongside). SPGD-1167 ports that boundary at its actual grain:
+  // the file-shaped-failure files are SUBTRACTED from the bare set and the
+  // note composes beside the unread arm's reporters — a bare file checked
+  // alongside an unreadable one is named, instead of the whole run reading
+  // as one problem. The subtraction is a no-op when nothing failed to read,
+  // so this one computation serves both arms and the fully-readable path's
+  // bytes are unchanged.
+  //
+  // It is a NOTE on stderr, never a warning and never an exit code: "lint,
+  // don't require" (SPGD-12 §1) keeps a missing annotation a non-error. It
+  // is composed into the report's stderr array — which cli.ts writes to
+  // stderr before rendering either output — so both renderers get it, and
+  // it lands BEFORE `jsonProvenance` so the selection sentence stays the
+  // stream's last line. The prefix is deliberately not `specguard lint:
+  // checked`, which the selection-sentence pins count.
+  const annotated = new Set(
+    findings.filter((f) => !f.aboutFile).map((f) => f.file),
+  );
+  const unreadFiles = new Set(
+    findings.filter((f) => f.aboutFile && !f.ok).map((f) => f.file),
+  );
+  const bare = selection.files.filter(
+    (file) => !annotated.has(file) && !unreadFiles.has(file),
+  );
+  const coverageNote =
+    bare.length === 0
+      ? null
+      : `specguard lint: note: ${bare.length} of ${selection.files.length} checked source file${selection.files.length === 1 ? "" : "s"} ${bare.length === 1 ? "carries" : "carry"} no @intent annotations: ${bare.join(", ")}`;
+
   if (unreadable > 0) {
     // A file that could not be read is "could not do its job" — exit 2 —
     // never a borrowed exit 1: the contract spends 1 on malformed
@@ -357,45 +403,13 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
       findings,
       stderr: [
         ...stderrHead,
+        ...(coverageNote === null ? [] : [coverageNote]),
         ...jsonProvenance,
         `specguard lint: error: ${unreadable} file(s) could not be read: ${named.join(", ")}`,
       ],
       selection,
     };
   }
-
-  // SPGD-1161: which of the checked files were read and yielded no `@intent`
-  // annotation at all. Zero findings (or an empty `findings` list in the
-  // document) is otherwise ambiguous between "every checked file was
-  // annotated and valid" and "half the checked files carry nothing" — and
-  // the missing-annotation question is the most actionable one this tool
-  // touches, because the bridge agent reading `linter_stderr` has no other
-  // view into the repository's source files. The specguard-ts mirror of the
-  // landed Ruby contract (`report_zero_annotation_files`, SPGD-1159).
-  //
-  // The boundary is the set-difference the findings list already supports:
-  // a file counts as covered when it yielded any annotation-site finding —
-  // valid OR malformed (a malformed annotation IS an annotation site, so a
-  // malformed-annotated file is not bare). A file-shaped failure (`read` /
-  // `no-match`) never reaches this site: the `unreadable > 0` arm above
-  // returns first with its own reporters, mirroring the Ruby unread
-  // boundary — an unread file is NOT a zero-annotation file.
-  //
-  // It is a NOTE on stderr, never a warning and never an exit code: "lint,
-  // don't require" (SPGD-12 §1) keeps a missing annotation a non-error. It
-  // is composed into the report's stderr array — which cli.ts writes to
-  // stderr before rendering either output — so both renderers get it, and
-  // it lands BEFORE `jsonProvenance` so the selection sentence stays the
-  // stream's last line. The prefix is deliberately not `specguard lint:
-  // checked`, which the selection-sentence pins count.
-  const annotated = new Set(
-    findings.filter((f) => !f.aboutFile).map((f) => f.file),
-  );
-  const bare = selection.files.filter((file) => !annotated.has(file));
-  const coverageNote =
-    bare.length === 0
-      ? null
-      : `specguard lint: note: ${bare.length} of ${selection.files.length} checked source file${selection.files.length === 1 ? "" : "s"} ${bare.length === 1 ? "carries" : "carry"} no @intent annotations: ${bare.join(", ")}`;
 
   return {
     ok: malformed === 0,

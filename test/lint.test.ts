@@ -1246,7 +1246,20 @@ test("a malformed-annotated file is never named bare — its annotation site sub
   assert.ok(!report.stderr.join("\n").includes("malformed.test.ts"));
 });
 
-test("a file-shaped read failure is never named by the note; its exit-2 arm and error line pass unedited", () => {
+// SPGD-1167: this pin MOVED DELIBERATELY (the SPGD-1108 disclosed-move
+// pattern). It landed with SPGD-1161 as the silence pin freezing the
+// over-applied boundary: any file-shaped failure and the whole note
+// vanished. The Ruby contract it cites (SPGD-1159, "never names an unread
+// file") is about not NAMING the unread file — "naming it annotation-free
+// would overstate exactly the way the summary count refuses to" — never
+// about suppressing the note for the files checked alongside it, and the
+// identical mixed scenario passes on the Ruby side with the note naming the
+// bare file. The "never named" clause below is unchanged and still true for
+// the unreadable file; the "NO note composes" clause is what the port
+// over-applied, and it now asserts the Ruby contract: the note names
+// bare.test.ts and never gone.test.ts, beside the unchanged unread error
+// line and the unchanged exit-2 arm.
+test("a mixed run names the bare file and never the unreadable one; the unread error line and exit-2 arm pass unedited", () => {
   const f = makeRepo({ "bare.test.ts": "it('y', () => {});\n" });
   const binary = stubBackend(
     [{ file: "gone.test.ts", kind: "no-match", ok: false, errors: ["no file(s) match"] }],
@@ -1254,16 +1267,86 @@ test("a file-shaped read failure is never named by the note; its exit-2 arm and 
   );
   const report = inRepo(f, ["bare.test.ts", "gone.test.ts"], binary);
   assert.equal(report.exitCode, EXIT_MISUSE);
-  // The unread arm's own reporter, byte-identical to today...
-  assert.ok(
-    report.stderr.includes("specguard lint: error: 1 file(s) could not be read: gone.test.ts"),
-    `the unread error line changed:\n${report.stderr.join("\n")}`,
+  // The whole stream, byte-pinned: the note composes between the
+  // validated-by head and the unread error line (the same relative position
+  // it holds on the normal path), and the error line itself is untouched.
+  assert.deepEqual(report.stderr, [
+    `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`,
+    "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: bare.test.ts",
+    "specguard lint: error: 1 file(s) could not be read: gone.test.ts",
+  ]);
+});
+
+// SPGD-1167 additive pins.
+
+test("an unreadable-only run emits no note — stderr and exit are byte-identical to today", () => {
+  // No bare files exist, so the note has nothing to name and the hoisted
+  // composition renders nothing: with the sole selected file unreadable,
+  // bare is empty and coverageNote is null. (gone.test.ts never exists on
+  // disk — the stub reports the read failure.)
+  const f = makeRepo({});
+  const binary = stubBackend(
+    [{ file: "gone.test.ts", kind: "no-match", ok: false, errors: ["no file(s) match"] }],
+    0,
   );
-  // ...and NO note composes on that arm — the run could not look inside one
-  // of its files, so no coverage claim is made about either.
+  const report = inRepo(f, ["gone.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  assert.deepEqual(report.stderr, [
+    `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`,
+    "specguard lint: error: 1 file(s) could not be read: gone.test.ts",
+  ]);
+});
+
+test("a mixed json run names the bare file on stderr with the document untouched", () => {
+  const f = makeRepo({ "bare.test.ts": "it('y', () => {});\n" });
+  const binary = stubBackend(
+    [{ file: "gone.test.ts", kind: "no-match", ok: false, errors: ["no file(s) match"] }],
+    0,
+  );
+  const cli = runCliInRepo(f, ["lint", "--json", "bare.test.ts", "gone.test.ts"], f.root, binary);
+  assert.equal(cli.exit, EXIT_MISUSE);
+  assert.deepEqual(cli.stderr.trimEnd().split("\n"), [
+    `specguard lint: validated by ${binary} (validate-intent stub (test) schema sha256:${GOOD})`,
+    "specguard lint: note: 1 of 2 checked source files carries no @intent annotations: bare.test.ts",
+    "specguard lint: error: 1 file(s) could not be read: gone.test.ts",
+  ]);
+  // Exit-2-with-findings still renders a document (cli.ts's render gate).
+  // The SPGD-858 parity fence holds on the new arm: the note lives on
+  // stderr; no document key moves and the summary keeps its shape.
+  const json = JSON.parse(cli.stdout) as {
+    ok: boolean;
+    summary: Record<string, unknown>;
+    findings: Array<Record<string, unknown>>;
+  };
+  assert.deepEqual(Object.keys(json), ["mode", "ok", "backend", "summary", "findings"]);
+  assert.equal(json.ok, false);
+  assert.deepEqual(json.summary, { files: 2, annotations: 0, malformed: 0, unreadable: 1 });
+  assert.equal(json.findings.length, 1);
+  assert.equal(json.findings[0]!["file"], "gone.test.ts");
+  assert.equal(json.findings[0]!["ok"], false);
+});
+
+test("a mixed run with several bare files names them together, in selection order, never the unreadable one", () => {
+  // The names are chosen so selection order and sorted order DIFFER
+  // (b_bare before a_bare): the pin discriminates "selection order" from
+  // "alphabetical" — the SPGD-1165 suite's plural pin could not.
+  const f = makeRepo({
+    "b_bare.test.ts": "it('b', () => {});\n",
+    "a_bare.test.ts": "it('a', () => {});\n",
+  });
+  const binary = stubBackend(
+    [{ file: "gone.test.ts", kind: "no-match", ok: false, errors: ["no file(s) match"] }],
+    0,
+  );
+  const report = inRepo(f, ["b_bare.test.ts", "a_bare.test.ts", "gone.test.ts"], binary);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  const noteLines = report.stderr.filter((l) => l.startsWith("specguard lint: note:"));
+  assert.deepEqual(noteLines, [
+    "specguard lint: note: 2 of 3 checked source files carry no @intent annotations: b_bare.test.ts, a_bare.test.ts",
+  ]);
   assert.ok(
-    !report.stderr.join("\n").includes("no @intent annotations"),
-    `a note fired beside a read failure:\n${report.stderr.join("\n")}`,
+    !noteLines.join("\n").includes("gone.test.ts"),
+    `the note named the unreadable file:\n${report.stderr.join("\n")}`,
   );
 });
 
