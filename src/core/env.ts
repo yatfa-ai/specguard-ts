@@ -49,8 +49,13 @@ function git(env: Record<string, string | undefined>, args: string[]): string | 
 }
 
 /**
- * Resolve the fixed list of environment variables the client reads — the same
- * list the Ruby client reads, with the same meanings. Nothing else is read.
+ * Resolve the fixed list of environment variables the client reads. The
+ * branch list is the Ruby client's `BRANCH_KEYS` plus `CI_COMMIT_BRANCH` —
+ * a key the Ruby client does not read, kept so a GitLab run resolves its
+ * branch even where only the branch name is set, and sitting directly
+ * beside `CI_COMMIT_REF_NAME` in the first-wins order. The shared keys
+ * keep the same meanings; when the Ruby list grows, this list grows with
+ * it — superset, never equality. Nothing else is read.
  *
  * `ciRunId` and `shardId` are stringified HERE, at the edge, whatever they
  * arrived as: `JSON.stringify` emits a bare `0` for a number and the endpoint

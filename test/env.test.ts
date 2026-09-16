@@ -54,10 +54,12 @@ test("empty-string variables are treated as unset", () => {
 });
 
 test("each provider branch variable resolves through readRunnerEnv", () => {
-  // The full list the Ruby client reads (its BRANCH_KEYS), so a TS suite on
-  // CircleCI, Buildkite, Jenkins or a GitLab merge-request pipeline keeps its
-  // branch attribution even though those providers check out in DETACHED HEAD
-  // and the `git branch --show-current` fallback returns empty there.
+  // The full list this client reads — the Ruby client's BRANCH_KEYS plus
+  // CI_COMMIT_BRANCH: a superset, never equality, and grown in step whenever
+  // the Ruby list gains a key — so a TS suite on CircleCI, Buildkite,
+  // Jenkins or a GitLab merge-request pipeline keeps its branch attribution
+  // even though those providers check out in DETACHED HEAD and the
+  // `git branch --show-current` fallback returns empty there.
   for (const [name, value] of [
     ["SPECGUARD_BRANCH", "feature/local"],
     ["GITHUB_REF_NAME", "feature/github"],
