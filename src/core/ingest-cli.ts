@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
-import { deliverRawLine } from "./transport.js";
+import { deliverRawLine, version } from "./transport.js";
 
 /**
  * `specguard-ingest`'s command line — the other end of the replay queue.
@@ -94,6 +94,8 @@ interface Options {
   fromLine: number;
   list: boolean;
   lineSet: LineRange[] | null;
+  /** Set by `-v`/`--version`: the identity query short-circuits the run. */
+  version: boolean;
 }
 
 /** The file, as this tool reads it: payloads held, blanks counted, held-backs counted and named. */
@@ -258,6 +260,12 @@ function parseOptions(argv: string[]): Options | null {
       return null; // caller prints usage
     } else if (arg === "--list") {
       list = true;
+    } else if (arg === "--version" || arg === "-v") {
+      // The identity query, exactly like --help above: it short-circuits the
+      // parse — before the no-file check and before any file is read — so a
+      // version-only run needs no file, no endpoint and no API key. The
+      // caller prints the one line and exits 0.
+      return { path: "", fromLine: 1, list: false, lineSet: null, version: true };
     } else if (arg === "--from-line" || arg === "--lines") {
       const value = argv[i + 1];
       if (value === undefined) {
@@ -293,6 +301,7 @@ function parseOptions(argv: string[]): Options | null {
     fromLine: fromLine ?? 1,
     list,
     lineSet,
+    version: false,
   };
 }
 
@@ -363,6 +372,7 @@ function helpText(): string {
     "  --lines SPEC      Deliver only the lines SPEC names — numbers and ranges",
     "                    over <file>'s own numbering, e.g. 3,7,12-15. Not",
     "                    combinable with --from-line",
+    "  -v, --version     Print the version (specguard-ts <version>) and exit",
     "  -h, --help        Print this help and exit",
     "",
     "Reads SPECGUARD_ENDPOINT, SPECGUARD_API_KEY and SPECGUARD_TIMEOUT.",
@@ -394,6 +404,13 @@ export async function run(
     const options = parseOptions(argv);
     if (options === null) {
       stdout.write(helpText());
+      return EXIT_OK;
+    }
+
+    if (options.version) {
+      // One line, exit 0 — reached before the no-file check, the credential
+      // checks and any file read, mirroring the Ruby client's `-v, --version`.
+      stdout.write(`specguard-ts ${version()}\n`);
       return EXIT_OK;
     }
 

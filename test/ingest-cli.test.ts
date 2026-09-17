@@ -775,3 +775,53 @@ test("REGRESSION: both bins run through the symlink npm installs them as", async
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- SPGD-1188: the version identity ----------------------------------------
+//
+// Mirrors the Ruby ingest bin's `-v/--version` (and the lint CLI's slice
+// above): one line `specguard-ts <version>`, exit 0, BEFORE the no-file
+// UsageError, the endpoint/API-key checks and any file read. The string is
+// the SAME version() the User-Agent stamps on every delivery. The FORMAT is
+// pinned against the live package version — never a literal.
+
+test("SPGD-1188: --version and -v print one identity line and exit 0 with NO file argument", async () => {
+  const pkg = JSON.parse(readFileSync(join(here, "..", "..", "package.json"), "utf8")) as {
+    version: string;
+  };
+  const expected = `specguard-ts ${pkg.version}\n`;
+  for (const argv of [["--version"], ["-v"]]) {
+    // No endpoint and no API key configured: the identity run must exit 0
+    // anyway, proving it never reaches the credential checks (or the
+    // no-file check this invocation would otherwise die on).
+    const r = await runCli(argv);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, expected);
+    assert.equal(r.stderr, "");
+  }
+});
+
+test("SPGD-1188: --version wins before any file is read — even a nonexistent one", async () => {
+  // If the file were opened, ENOENT would become "no such file" (exit 2);
+  // the identity line + exit 0 proves the parse short-circuits before any
+  // file read, exactly like --help does.
+  const r = await runCli(["--version", "no-such-file.jsonl"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^specguard-ts \d+\.\d+\.\d+\n$/);
+  assert.equal(r.stderr, "");
+});
+
+test("SPGD-1188: near-miss flags are NOT swallowed by the version arm", async () => {
+  for (const flag of ["--versions", "--ver"]) {
+    const r = await runCli([flag]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, new RegExp(`invalid option: ${flag}`));
+    assert.equal(r.stdout, "");
+  }
+});
+
+test("SPGD-1188: --help describes -v, --version and keeps the usage banner", async () => {
+  const r = await runCli(["--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /-v, --version/);
+  assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file>/);
+});

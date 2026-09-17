@@ -1,6 +1,7 @@
 import { mkdir, appendFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import type { Envelope } from "./types.js";
 import type { RunnerEnv } from "./env.js";
@@ -249,16 +250,46 @@ function userAgent(): string {
 }
 
 let cachedVersion: string | null = null;
-function version(): string {
+export function version(): string {
   if (cachedVersion !== null) return cachedVersion;
-  try {
-    // createRequire, not `require` — this package is ESM.
-    const require = createRequire(import.meta.url);
-    const pkg = require("../package.json") as { version?: string } | undefined;
-    cachedVersion =
-      pkg !== undefined && typeof pkg.version === "string" ? pkg.version : "0.0.0";
-  } catch {
-    cachedVersion = "0.0.0";
-  }
+  cachedVersion = readPackageVersion();
   return cachedVersion;
+}
+
+/**
+ * Walk UP from this module to the package root and read the first
+ * package.json that names this package.
+ *
+ * The original read was a fixed `"../package.json"`, which resolves against
+ * the module's OWN directory — `<pkg>/dist/core` in every layout that ships —
+ * so `../package.json` named `<pkg>/dist/package.json`, which does not exist.
+ * The lookup therefore answered the `"0.0.0"` fallback in every built layout
+ * (the dist build, an npm install, and the test build alike): the User-Agent
+ * test only pinned `/^specguard-ts\//`, so nothing ever caught it, and every
+ * delivery advertised `specguard-ts/0.0.0`. Walking up (bounded, and
+ * name-checked — an ancestor monorepo or vendoring application's
+ * package.json must never be mistaken for this package's) finds the true
+ * manifest in every layout; a tree without one still answers `"0.0.0"`.
+ * Still exactly one read, still createRequire — this package is ESM — and
+ * still cached by `version()` above.
+ */
+function readPackageVersion(): string {
+  const require = createRequire(import.meta.url);
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 6; depth += 1) {
+    try {
+      const pkg = require(join(dir, "package.json")) as
+        | { name?: unknown; version?: unknown }
+        | undefined;
+      if (pkg !== undefined && pkg.name === "@yatfa/specguard" && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+      // No manifest at this level — keep walking toward the root.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break; // the filesystem root
+    dir = parent;
+  }
+  return "0.0.0";
 }

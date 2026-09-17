@@ -11,16 +11,21 @@
  * them from the git diff against the merge base with the default branch (or
  * an explicit `<base>`). Exit codes: 0 clean (including zero annotations),
  * 1 malformed annotations, 2 could not do its job.
+ *
+ * `-v`/`--version` — bare or after `lint` — prints `specguard-ts <version>`
+ * (one line, exit 0) before any discovery or scan.
  */
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { EXIT_MISUSE, lint } from "./lint/lint.js";
+import { EXIT_MISUSE, EXIT_OK, lint } from "./lint/lint.js";
 import { renderHuman, renderJson } from "./lint/report.js";
+import { version } from "./core/transport.js";
 
 interface Options {
   json: boolean;
   help: boolean;
+  version: boolean;
   changed: boolean;
   /** The explicit diff base of `--changed=<base>`; null means "derive it".
    * An explicit EMPTY base stays explicit (and fails loudly at the diff),
@@ -35,7 +40,7 @@ function usage(stream: NodeJS.WriteStream): void {
 }
 
 function parse(argv: string[]): Parsed {
-  const options: Options = { json: false, help: false, changed: false, base: null };
+  const options: Options = { json: false, help: false, version: false, changed: false, base: null };
   const paths: string[] = [];
   for (const arg of argv) {
     if (arg === "--json") options.json = true;
@@ -44,6 +49,7 @@ function parse(argv: string[]): Parsed {
       options.changed = true;
       options.base = arg.slice("--changed=".length);
     } else if (arg === "--help" || arg === "-h") options.help = true;
+    else if (arg === "--version" || arg === "-v") options.version = true;
     else if (arg.startsWith("--")) return { error: `invalid option: ${arg}` };
     else paths.push(arg);
   }
@@ -63,6 +69,14 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
     return subcommand === undefined ? 2 : 0;
   }
 
+  if (subcommand === "--version" || subcommand === "-v") {
+    // The identity query: one line, exit 0, before any discovery or scan —
+    // the same contract the Ruby client's `-v, --version` option honors
+    // (cli.rb prints `specguard-ruby #{VERSION}` and returns before scanning).
+    stdout.write(`specguard-ts ${version()}\n`);
+    return EXIT_OK;
+  }
+
   if (subcommand !== "lint") {
     stderr.write(`specguard: error: unknown command: ${subcommand}\n`);
     usage(stderr);
@@ -74,10 +88,18 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
     stderr.write(`specguard lint: error: ${parsed.error}\n`);
     return 2;
   }
+  if (parsed.options.version) {
+    // The identity query again, at lint level: one line, exit 0, before any
+    // discovery or scan (the Ruby suite pins that a version-only run scans
+    // nothing on its way to the exit).
+    stdout.write(`specguard-ts ${version()}\n`);
+    return EXIT_OK;
+  }
   if (parsed.options.help) {
     usage(stdout);
     stdout.write(
-      "\n  --changed[=<base>]  check only files changed against <base> (default: the\n" +
+      "\n  -v, --version       print the version and exit\n" +
+        "  --changed[=<base>]  check only files changed against <base> (default: the\n" +
         "                      merge base with the default branch; never a bare\n" +
         "                      working-tree-vs-index diff, which is empty in CI).\n" +
         "                      Untracked files are selected too, so a brand-new\n" +

@@ -149,6 +149,9 @@ export SPECGUARD_API_KEY=…            # the key that was rotated, fixed
 specguard-ingest log/test_results.jsonl
 ```
 
+`specguard-ingest --version` (also `-v`) prints the same one identity line and
+exits 0 — it needs no file, no endpoint and no API key.
+
 ```
 line 1: accepted — HTTP 202, test_run_id 41f2c9b8, ci_run_id 17442
 line 2: accepted — HTTP 202, test_run_id 41f2c9b8, ci_run_id 17442
@@ -555,6 +558,10 @@ specguard lint src/a.ts   # check named files
 specguard lint --changed  # check only what changed against the default branch
 specguard lint --json     # machine-readable report on stdout
 ```
+
+`specguard --version` (also `-v`, and the same flag after `lint`) prints one
+line — `specguard-ts <version>`, the same version the HTTP client stamps into
+its User-Agent — and exits 0 without discovering or scanning anything.
 
 `--changed[=<base>]` is the CI selection mode: it picks the annotated sources
 in the git diff against the **merge base with the default branch**

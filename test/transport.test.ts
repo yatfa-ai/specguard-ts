@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { once } from "node:events";
-import { deliver, GZIP_THRESHOLD_BYTES } from "../src/core/transport.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { deliver, GZIP_THRESHOLD_BYTES, version } from "../src/core/transport.js";
 import type { RunnerEnv } from "../src/core/env.js";
 import type { Envelope } from "../src/core/types.js";
 import type { SpecRow } from "../src/core/types.js";
@@ -277,4 +280,21 @@ test("a fallback write that itself fails only warns — never throws", async () 
   assert.equal(result.delivered, false);
   assert.equal(s.warnings.length, 2); // delivery failure + write failure
   assert.match(s.warnings[1] ?? "", /could not write telemetry/);
+});
+
+// --- SPGD-1188: version() must resolve the REAL package version --------------
+//
+// The UA prefix test above pins only /^specguard-ts\//, which is why a
+// pre-existing defect survived: the old fixed "../package.json" read resolved
+// against <pkg>/dist/core, named <pkg>/dist/package.json, never existed, and
+// every built layout (dist, npm install, the test build) answered the "0.0.0"
+// fallback — every delivery advertised specguard-ts/0.0.0. This pin holds the
+// identity line (and the User-Agent value) to the manifest's truth.
+
+test("version() resolves the package manifest's own version in the compiled layout", () => {
+  const pkg = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8"),
+  ) as { version: string };
+  assert.match(version(), /^\d+\.\d+\.\d+$/);
+  assert.equal(version(), pkg.version);
 });
