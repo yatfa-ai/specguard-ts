@@ -1555,3 +1555,89 @@ test("full clone (AC3): thin-base notes and the diff-failure error keep their ex
   }
   assert.equal(message, `--changed could not diff against "${absentSha}"`);
 });
+
+// --- SPGD-1188: the version identity ----------------------------------------
+//
+// The Ruby client answers `-v/--version` with ONE identity line, exit 0,
+// before scanning (cli.rb, pinned in cli_spec.rb as "a version-only run
+// scans nothing on its way to the exit"); the TS pair answered exit 2. The
+// identity string is the SAME version() the User-Agent stamps (transport.ts),
+// exported rather than re-read. The pins below mirror the Ruby triple: the
+// line + exit 0 in every invocation position, a version-only run that
+// discovers nothing, and a misuse arm that still refuses near-miss flags.
+// The FORMAT is pinned (against the live package version, like the Ruby suite
+// pins SpecGuard::VERSION) — never a literal.
+
+const pkgVersion: string = (
+  JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+    version: string;
+  }
+).version;
+
+test("SPGD-1188: the version prints one line and exits 0 in every invocation position", () => {
+  const expected = `specguard-ts ${pkgVersion}\n`;
+  for (const argv of [["--version"], ["-v"], ["lint", "--version"], ["lint", "-v"]]) {
+    const out = capture();
+    const err = capture();
+    const exit = runCli(argv, out.stream, err.stream);
+    assert.equal(exit, EXIT_OK, `specguard ${argv.join(" ")} must exit 0`);
+    assert.equal(
+      out.lines.join(""),
+      expected,
+      `specguard ${argv.join(" ")} must print exactly the one identity line on stdout`,
+    );
+    assert.equal(err.lines.join(""), "");
+  }
+});
+
+test("SPGD-1188: a version-only run discovers nothing on its way to the exit", () => {
+  // A repo holding a scannable annotated file, and a process.cwd stub that
+  // throws: discovery's first act is cwd (the same stub the SPGD-1124
+  // boundary test uses to reach lint()'s selection), so a version-only run
+  // that still answers with the identity line and exit 0 proves it never
+  // discovered — and never scanned the file sitting next to it.
+  const f = makeRepo({ "guarded.ts": GOOD_ANNOTATION + "\n" });
+  const out = capture();
+  const err = capture();
+  const originalCwd = process.cwd.bind(process);
+  process.cwd = () => {
+    throw new Error("a version-only run must not discover: cwd exploded");
+  };
+  try {
+    const exit = runCli(["lint", "--version"], out.stream, err.stream);
+    assert.equal(exit, EXIT_OK);
+    assert.equal(out.lines.join(""), `specguard-ts ${pkgVersion}\n`);
+    assert.equal(err.lines.join(""), "");
+  } finally {
+    process.cwd = originalCwd;
+  }
+});
+
+test("SPGD-1188: near-miss flags are NOT swallowed by the version arm", () => {
+  // The misuse arm keeps its exact vocabulary: subcommand position stays
+  // "unknown command", lint position stays "invalid option", both exit 2 —
+  // the version arm is exact-match only.
+  const unknownOut = capture();
+  const unknownErr = capture();
+  assert.equal(runCli(["--versions"], unknownOut.stream, unknownErr.stream), EXIT_MISUSE);
+  assert.match(unknownErr.lines.join(""), /unknown command: --versions/);
+  assert.equal(unknownOut.lines.join(""), "");
+
+  for (const flag of ["--versions", "--ver"]) {
+    const o = capture();
+    const e = capture();
+    assert.equal(runCli(["lint", flag], o.stream, e.stream), EXIT_MISUSE);
+    assert.match(e.lines.join(""), new RegExp(`invalid option: ${flag}`));
+    assert.equal(o.lines.join(""), "");
+  }
+});
+
+test("SPGD-1188: help describes -v, --version and keeps the usage line", () => {
+  const out = capture();
+  const err = capture();
+  const exit = runCli(["lint", "--help"], out.stream, err.stream);
+  assert.equal(exit, 0);
+  const text = out.lines.join("");
+  assert.match(text, /^Usage: specguard lint \[--json\] \[--changed\[=<base>\]\] \[files\.\.\.\]$/m);
+  assert.match(text, /-v, --version/);
+});
