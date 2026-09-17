@@ -192,7 +192,7 @@ test("the request carries User-Agent specguard-ts/<version>", async () => {
   });
   try {
     await deliver(envelope(), env({ endpoint: srv.url }), { warn: () => {}, appendFileImpl: async () => {} });
-    assert.match(ua ?? "", /^specguard-ts\//);
+    assert.equal(ua, `specguard-ts/${version()}`);
   } finally {
     await srv.close();
   }
@@ -284,12 +284,14 @@ test("a fallback write that itself fails only warns — never throws", async () 
 
 // --- SPGD-1188: version() must resolve the REAL package version --------------
 //
-// The UA prefix test above pins only /^specguard-ts\//, which is why a
-// pre-existing defect survived: the old fixed "../package.json" read resolved
-// against <pkg>/dist/core, named <pkg>/dist/package.json, never existed, and
-// every built layout (dist, npm install, the test build) answered the "0.0.0"
-// fallback — every delivery advertised specguard-ts/0.0.0. This pin holds the
-// identity line (and the User-Agent value) to the manifest's truth.
+// Until SPGD-1195 the UA test above pinned only /^specguard-ts\//, which is
+// why a pre-existing defect survived: the old fixed "../package.json" read
+// resolved against <pkg>/dist/core, named <pkg>/dist/package.json, never
+// existed, and every built layout (dist, npm install, the test build) answered
+// the "0.0.0" fallback — every delivery advertised specguard-ts/0.0.0. The UA
+// test now pins the full `specguard-ts/${version()}` value (SPGD-1195), and
+// this pin holds the identity line (and the User-Agent value) to the
+// manifest's truth.
 
 test("version() resolves the package manifest's own version in the compiled layout", () => {
   const pkg = JSON.parse(

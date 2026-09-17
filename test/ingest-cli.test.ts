@@ -11,6 +11,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { run } from "../src/core/ingest-cli.js";
+import { version } from "../src/core/transport.js";
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -667,7 +668,7 @@ test("the request carries the Authorization header and the specguard-ts User-Age
     const r = await runCli([file], `http://127.0.0.1:${port}`);
     assert.equal(r.code, 0);
     assert.equal(auth, "Bearer sgk_ingest_test");
-    assert.match(ua ?? "", /^specguard-ts\//);
+    assert.equal(ua, `specguard-ts/${version()}`);
     rm(file);
   } finally {
     server.close();

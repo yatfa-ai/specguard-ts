@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import type { Envelope, SpecRow } from "../src/core/types.js";
 import { SCHEMA_CONTRACT_DIGEST } from "../src/core/validator.js";
+import { version } from "../src/core/transport.js";
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -161,7 +162,7 @@ test("end to end: a real Jest run with zero annotations POSTs and is accepted (2
     assert.equal(req.url, "/api/v1/ingest");
     assert.equal(req.auth, "Bearer sgk_integration");
     assert.equal(req.contentType, "application/json");
-    assert.match(req.userAgent ?? "", /^specguard-ts\//);
+    assert.equal(req.userAgent, `specguard-ts/${version()}`);
     assert.equal(req.body.commit_sha, "deadbeef");
   } finally {
     await srv.close();
