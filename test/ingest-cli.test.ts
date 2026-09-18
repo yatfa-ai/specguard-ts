@@ -1020,6 +1020,36 @@ test("SPGD-1226: a delivery that never got an answer carries code null and the e
   }
 });
 
+test("SPGD-1241: under --json an invalid-UTF-8 line's document row carries the UTF-8 verdict in reasons, not a folded empty list", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", Buffer.concat([
+      Buffer.from(runLine("1"), "utf8"), Buffer.from([0x0a]),
+      Buffer.from([0xff, 0xfe, 0xff]), Buffer.from([0x0a]),
+    ]));
+    const r = await runCli(["--json", file], srv.url);
+    assert.equal(r.code, 2);
+    const doc = parseDocument(r.stdout);
+    const lines = doc.lines as Record<string, unknown>[];
+    // The whole row, per the file's whole-row idiom. `reasons` is the
+    // document's ONLY statement of why this line failed — the text row's
+    // `detail` happens to carry the same string, but a document consumer
+    // never sees the text row, and reasons(null) would fold to [].
+    assert.deepEqual(lines[1], {
+      number: 2,
+      status: "unparseable",
+      code: null,
+      reasons: ["the line is not valid UTF-8, so it cannot be a run"],
+      test_run_id: null,
+      ci_run_id: null,
+    });
+    assert.equal(srv.bodies.length, 1, "the good line still delivered");
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
 test("SPGD-1226: --list --json lists the envelope facts as values and delivers nothing", async () => {
   const file = tmpFile(
     "q.jsonl",
