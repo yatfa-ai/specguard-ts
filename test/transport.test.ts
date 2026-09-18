@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deliver, GZIP_THRESHOLD_BYTES, version } from "../src/core/transport.js";
+import { deliver, deliverRawLine, GZIP_THRESHOLD_BYTES, refusalReasons, version } from "../src/core/transport.js";
 import type { RunnerEnv } from "../src/core/env.js";
 import type { Envelope } from "../src/core/types.js";
 import type { SpecRow } from "../src/core/types.js";
@@ -299,4 +299,136 @@ test("version() resolves the package manifest's own version in the compiled layo
   ) as { version: string };
   assert.match(version(), /^\d+\.\d+\.\d+$/);
   assert.equal(version(), pkg.version);
+});
+
+// --- SPGD-1226: the refusal parse --------------------------------------------
+//
+// The platform answers a 400 with ONE error per offending spec
+// (`render_bad_request` puts every one of them in `details`). The raw-text
+// `detail` flattens that to 300 characters — right for the one CI-warning
+// line it is, useless for the command whose job is to fix and re-send the
+// run. `refusalReasons` keeps the whole array, parsed off the SAME single
+// body read, degrading to null on anything unreadable — never a new failure
+// mode on the never-throw path. The predicates are the Ruby Transport's
+// `refusal_reasons`, ported exactly.
+
+/** A `render_bad_request`-shaped body; `null` omits the key entirely. */
+function refusalBody(details: unknown, message: string | null = null): string {
+  const body: Record<string, unknown> = { error: "bad_request" };
+  if (message !== null) body.message = message;
+  if (details !== null) body.details = details;
+  return JSON.stringify(body);
+}
+
+test("SPGD-1226: a 400 carrying details of N strings yields reasons of length N — uncapped, in the platform's order (N ≫ 3)", async () => {
+  const specs = Array.from({ length: 25 }, (_, i) =>
+    `specs[${i}] test/a.test.js:${100 + i}: duration must be a non-negative number when present`,
+  );
+  const srv = await startServer((req, res) => {
+    res.statusCode = 400;
+    res.end(refusalBody(specs, specs[0]!));
+  });
+  try {
+    const result = await deliverRawLine(JSON.stringify(envelope()), env({ endpoint: srv.url }));
+    assert.equal(result.outcome, "http-error");
+    assert.equal(result.status, 400);
+    assert.deepEqual(result.reasons, specs);
+    assert.ok(result.reasons !== null && result.reasons.length === 25,
+      "the cap is a render-time concern of the human line; the parse keeps every reason");
+    // The structured list and the flattened line are two halves of ONE read:
+    // detail stays today's truncated one-liner, byte for byte.
+    assert.ok(result.detail.endsWith("…"), result.detail);
+    assert.ok(result.detail.length <= 301);
+    assert.ok(!result.detail.includes("\n"));
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1226: a message-only body is a single-entry fallback", async () => {
+  const srv = await startServer((req, res) => {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: "bad_request", message: "specs is required and must be an array" }));
+  });
+  try {
+    const result = await deliverRawLine("{}", env({ endpoint: srv.url }));
+    assert.equal(result.outcome, "http-error");
+    assert.deepEqual(result.reasons, ["specs is required and must be an array"]);
+    // `detail` is unchanged: the flattened FULL body, not the message.
+    assert.equal(result.detail, '{"error":"bad_request","message":"specs is required and must be an array"}');
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1226: details that are not a non-empty all-string array fall through to message, then to null", async () => {
+  const cases: { body: string; want: string[] | null }[] = [
+    { body: refusalBody(["ok", 42], "mixed types"), want: ["mixed types"] },
+    { body: refusalBody([], "empty details"), want: ["empty details"] },
+    { body: refusalBody("not an array", "details not an array"), want: ["details not an array"] },
+    { body: refusalBody([["nested"], 1], "still mixed"), want: ["still mixed"] },
+    { body: refusalBody(["ok", 42]), want: null }, // no message either
+    { body: refusalBody([]), want: null },
+    { body: refusalBody(null), want: null }, // no details, no message
+  ];
+  for (const { body, want } of cases) {
+    const srv = await startServer((req, res) => {
+      res.statusCode = 400;
+      res.end(body);
+    });
+    try {
+      const result = await deliverRawLine("{}", env({ endpoint: srv.url }));
+      assert.equal(result.outcome, "http-error");
+      assert.deepEqual(result.reasons, want, body);
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+test("SPGD-1226: a refusal body that is not JSON, is a JSON scalar, or is empty degrades to today's detail — no new failure mode", async () => {
+  const cases: string[] = [
+    "<html>413 Request Entity Too Large</html>",
+    "boom",
+    "42",
+    '"just a string"',
+    "null",
+    "true",
+    "[]",
+    "",
+  ];
+  for (const body of cases) {
+    const srv = await startServer((req, res) => {
+      res.statusCode = 400;
+      res.end(body);
+    });
+    try {
+      const result = await deliverRawLine("{}", env({ endpoint: srv.url }));
+      assert.equal(result.outcome, "http-error");
+      assert.equal(result.reasons, null, JSON.stringify(body));
+      // The detail is today's byte-exact rendering — whitespace flattened,
+      // hard-truncated at 300 with an ellipsis — computed here independently
+      // of the implementation so the pin cannot rot with it.
+      const flattened = body.replace(/\s+/g, " ").trim();
+      const want = flattened.length > 300 ? `${flattened.slice(0, 300)}…` : flattened;
+      assert.equal(result.detail, want, JSON.stringify(body));
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+test("SPGD-1226: refusalReasons — the Ruby twin's predicate matrix, unit-pinned", () => {
+  const details = Array.from({ length: 12 }, (_, i) => `specs[${i}] x.test.js:1`);
+  assert.deepEqual(refusalReasons(JSON.stringify({ error: "bad_request", details })), details);
+  assert.deepEqual(refusalReasons(JSON.stringify({ message: "only a message" })), ["only a message"]);
+  assert.deepEqual(refusalReasons('{"message":"m","details":["a"]}'), ["a"]);
+  assert.equal(refusalReasons("{}"), null); // no details, no message
+  assert.equal(refusalReasons("not json"), null);
+  assert.equal(refusalReasons(""), null);
+  assert.equal(refusalReasons("null"), null);
+  assert.equal(refusalReasons("[]"), null);
+  assert.equal(refusalReasons("7"), null);
+  assert.equal(refusalReasons('"s"'), null);
+  assert.equal(refusalReasons('{"details":"a string"}'), null);
 });

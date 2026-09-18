@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
 import { deliverRawLine, version } from "./transport.js";
+import { renderDelivery, renderListing } from "./ingest-reporter.js";
 
 /**
  * `specguard-ingest`'s command line — the other end of the replay queue.
@@ -67,18 +68,52 @@ const STATUS_LABELS: Record<LineStatus, string> = {
   unparseable: "unparseable",
 };
 
-interface LineResult {
+export interface LineResult {
   /** 1-based position in the file as given, blanks counted — the number an editor shows. */
   number: number;
   status: LineStatus;
   detail: string;
+  /**
+   * The endpoint's HTTP status, `null` where there is not one: a line that
+   * was never a run, and a delivery that never got an answer at all.
+   * Together with `status` it tells those two apart from a refusal, which is
+   * why `reasons` can collapse all three into one list.
+   */
+  code: number | null;
+  /**
+   * Why the line did not land, AS IT ARRIVED: the platform's per-spec strings
+   * on a refusal — the whole array, uncapped, not the three the `detail` line
+   * has room for — the parse problem where the line was never a run, the
+   * error's rendering where nothing reached the endpoint, and `[]` on an
+   * acceptance. `null` where a refusal's body said nothing readable.
+   * Normalising this to an always-a-list-of-strings is the REPORTER's job,
+   * because that guarantee is the document's rather than this struct's —
+   * exactly the split the Ruby twin draws (`IngestCLI::LineResult` vs
+   * `IngestReporter.reasons`).
+   */
+  reasons: string[] | null;
   /** The endpoint's run id, on an acceptance. */
   testRunId: string | null;
   /** The line's own ci_run_id, when it carried one — the folding key. */
   ciRunId: string | null;
 }
 
-interface ListedLine {
+/** Two or more accepted lines that went out with one ci_run_id and came back with one test_run_id — folding, observed rather than inferred. */
+export interface Folding {
+  ciRunId: string;
+  testRunId: string;
+  numbers: number[];
+}
+
+/** The four status counts, computed once per run and handed to whichever renderer runs. */
+export interface StatusCounts {
+  accepted: number;
+  refused: number;
+  undelivered: number;
+  unparseable: number;
+}
+
+export interface ListedLine {
   number: number;
   /** Why the line is not a run; null for every line that is one. */
   problem: string | null;
@@ -89,17 +124,19 @@ interface ListedLine {
   durationSeconds: number | null;
 }
 
-interface Options {
+export interface Options {
   path: string;
   fromLine: number;
   list: boolean;
   lineSet: LineRange[] | null;
+  /** Chooses the renderer, never the set that is listed or sent and never the code that is returned. */
+  json: boolean;
   /** Set by `-v`/`--version`: the identity query short-circuits the run. */
   version: boolean;
 }
 
 /** The file, as this tool reads it: payloads held, blanks counted, held-backs counted and named. */
-interface Source {
+export interface Source {
   path: string;
   /** `text` is null for a line that is not valid UTF-8 — a verdict/row, never a delivery. */
   lines: { number: number; text: string | null }[];
@@ -252,6 +289,7 @@ function parseOptions(argv: string[]): Options | null {
   let fromLine: number | null = null;
   let lineSet: LineRange[] | null = null;
   let list = false;
+  let json = false;
   const files: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -260,12 +298,18 @@ function parseOptions(argv: string[]): Options | null {
       return null; // caller prints usage
     } else if (arg === "--list") {
       list = true;
+    } else if (arg === "--json") {
+      // Deliberately alongside the selectors rather than instead of them:
+      // like --list, it composes with everything — it chooses the renderer,
+      // never the set that is listed or sent and never the code that is
+      // returned. No single-dash short form exists, here or in the Ruby twin.
+      json = true;
     } else if (arg === "--version" || arg === "-v") {
       // The identity query, exactly like --help above: it short-circuits the
-      // parse — before the no-file check and before any file is read — so a
-      // version-only run needs no file, no endpoint and no API key. The
-      // caller prints the one line and exits 0.
-      return { path: "", fromLine: 1, list: false, lineSet: null, version: true };
+      // parse — before the no-file check, before --json is considered, and
+      // before any file is read — so a version-only run needs no file, no
+      // endpoint and no API key. The caller prints the one line and exits 0.
+      return { path: "", fromLine: 1, list: false, lineSet: null, json: false, version: true };
     } else if (arg === "--from-line" || arg === "--lines") {
       const value = argv[i + 1];
       if (value === undefined) {
@@ -301,6 +345,7 @@ function parseOptions(argv: string[]): Options | null {
     fromLine: fromLine ?? 1,
     list,
     lineSet,
+    json,
     version: false,
   };
 }
@@ -372,6 +417,7 @@ function helpText(): string {
     "  --lines SPEC      Deliver only the lines SPEC names — numbers and ranges",
     "                    over <file>'s own numbering, e.g. 3,7,12-15. Not",
     "                    combinable with --from-line",
+    "  --json            Emit one JSON document on stdout instead of the human report",
     "  -v, --version     Print the version (specguard-ts <version>) and exit",
     "  -h, --help        Print this help and exit",
     "",
@@ -442,7 +488,7 @@ export async function run(
       results.push(await deliverLine(line.number, line.text, env, opts));
     }
 
-    report(source, results, stdout, stderr);
+    report(source, results, stdout, stderr, options.json);
     return exitCode(results);
   } catch (err) {
     // A UsageError is this tool answering its caller — a bad flag, a
@@ -481,11 +527,15 @@ async function deliverLine(
   opts: IngestRunOptions,
 ): Promise<LineResult> {
   if (text === null) {
-    // The reference's verdict, verbatim: such a line cannot be a run.
+    // The reference's verdict, verbatim: such a line cannot be a run. No
+    // code, because no request was ever built.
+    const problem = "the line is not valid UTF-8, so it cannot be a run";
     return {
       number,
       status: "unparseable",
-      detail: "the line is not valid UTF-8, so it cannot be a run",
+      detail: problem,
+      code: null,
+      reasons: [problem],
       testRunId: null,
       ciRunId: null,
     };
@@ -497,6 +547,8 @@ async function deliverLine(
       number,
       status: "unparseable",
       detail: parsed.problem,
+      code: null,
+      reasons: [parsed.problem],
       testRunId: null,
       ciRunId: null,
     };
@@ -512,6 +564,8 @@ async function deliverLine(
       number,
       status: "accepted",
       detail: `HTTP ${raw.status}`,
+      code: raw.status,
+      reasons: [],
       testRunId: raw.testRunId,
       ciRunId,
     };
@@ -522,14 +576,23 @@ async function deliverLine(
       number,
       status: CONTENT_REFUSAL_CODES.includes(raw.status) ? "refused" : "undelivered",
       detail,
+      code: raw.status,
+      // `raw.reasons` verbatim — the whole array off the refusal body, not
+      // the fragment the `detail` line flattens it to; `null` when the body
+      // said nothing readable, which the reporter renders as `[]`.
+      reasons: raw.reasons,
       testRunId: null,
       ciRunId,
     };
   }
+  // No code, because no answer: the error's rendering is the whole of what
+  // there is to say, and it is the only thing `reasons` can carry.
   return {
     number,
     status: "undelivered",
     detail: raw.detail,
+    code: null,
+    reasons: [raw.detail],
     testRunId: null,
     ciRunId,
   };
@@ -545,7 +608,7 @@ function lineReport(result: LineResult): string {
 }
 
 /** Folding, stated only where it was SEEN: same ci_run_id in, same test_run_id out, ≥2 lines. */
-function foldedRuns(results: LineResult[]): { ciRunId: string; testRunId: string; numbers: number[] }[] {
+function foldedRuns(results: LineResult[]): Folding[] {
   const groups = new Map<string, LineResult[]>();
   for (const r of results) {
     if (r.status !== "accepted" || r.ciRunId === null || r.testRunId === null) continue;
@@ -585,18 +648,55 @@ function emptyDetail(source: Source): string {
   return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
-function report(source: Source, results: LineResult[], stdout: IngestStream, stderr: IngestStream): void {
+function statusCounts(results: LineResult[]): StatusCounts {
+  const counts: StatusCounts = { accepted: 0, refused: 0, undelivered: 0, unparseable: 0 };
+  for (const r of results) counts[r.status] += 1;
+  return counts;
+}
+
+/**
+ * The per-line report on stdout — it is the product — with the diagnostics
+ * about this tool's own situation on stderr. `--json` moves the product and
+ * leaves the diagnostics: a run that delivered nothing is still loud on
+ * stderr, in both renderers, because the warning is a statement about this
+ * tool's situation and not a result.
+ *
+ * Two renderers, one set of facts: the counts and the folding groups are
+ * computed ONCE here and handed to whichever renderer runs — a command whose
+ * two renderers can disagree about how much of a file it delivered is worse
+ * than one that only prints prose.
+ */
+function report(
+  source: Source,
+  results: LineResult[],
+  stdout: IngestStream,
+  stderr: IngestStream,
+  json: boolean,
+): void {
   if (results.length === 0) {
     stderr.write(
       `specguard-ingest: warning: ${source.path} holds no runs to deliver${emptyDetail(source)}\n`,
     );
+    // An empty file still writes the document under --json — the file was
+    // read, and `"lines": []` over a summary of zeroes is a true statement
+    // about it. Only a run that never got as far as reading <file> (a bad
+    // flag, no credentials, an unreadable file) writes no document at all.
+    if (!json) return;
+  }
+
+  const counts = statusCounts(results);
+  const foldings = foldedRuns(results);
+
+  if (json) {
+    stdout.write(renderDelivery({ source, results, counts, foldings }));
     return;
   }
+
   for (const result of results) {
     stdout.write(`${lineReport(result)}\n`);
   }
-  stdout.write(`${summaryLine(source, results)}\n`);
-  for (const folding of foldedRuns(results)) {
+  stdout.write(`${summaryLine(source, results, counts)}\n`);
+  for (const folding of foldings) {
     stdout.write(
       `specguard-ingest: lines ${folding.numbers.join(", ")} carried ci_run_id ${folding.ciRunId} ` +
         `and each came back with test_run_id ${folding.testRunId} — the endpoint folded them onto one run\n`,
@@ -604,18 +704,13 @@ function report(source: Source, results: LineResult[], stdout: IngestStream, std
   }
 }
 
-function summaryLine(source: Source, results: LineResult[]): string {
-  const refused = results.filter((r) => r.status === "refused").length;
-  const undelivered = results.filter((r) => r.status === "undelivered").length;
-  const unparseable = results.filter((r) => r.status === "unparseable").length;
-  const accepted = results.length - refused - undelivered - unparseable;
-
+function summaryLine(source: Source, results: LineResult[], counts: StatusCounts): string {
   const parts = [
-    `specguard-ingest: delivered ${accepted} of ${plural(results.length, "run")} from ${source.path}`,
+    `specguard-ingest: delivered ${counts.accepted} of ${plural(results.length, "run")} from ${source.path}`,
   ];
-  if (refused > 0) parts.push(`${refused} refused`);
-  if (undelivered > 0) parts.push(`${undelivered} could not be delivered`);
-  if (unparseable > 0) parts.push(`${unparseable} could not be parsed`);
+  if (counts.refused > 0) parts.push(`${counts.refused} refused`);
+  if (counts.undelivered > 0) parts.push(`${counts.undelivered} could not be delivered`);
+  if (counts.unparseable > 0) parts.push(`${counts.unparseable} could not be parsed`);
   if (source.blank > 0) parts.push(blankClause(source));
   if (source.skipped > 0) parts.push(skippedClause(source));
   return parts.join("; ");
@@ -634,6 +729,15 @@ async function list(options: Options, stdout: IngestStream, stderr: IngestStream
     stderr.write(
       `specguard-ingest: warning: ${source.path} holds no runs to list${emptyDetail(source)}\n`,
     );
+    // Under --json the empty listing still writes the document — the file
+    // was read, and `"lines": []` over a summary of zeroes is a true
+    // statement about it; a file that could not be read raised before there
+    // was anything to be a document about.
+    if (!options.json) return EXIT_OK;
+  }
+
+  if (options.json) {
+    stdout.write(renderListing({ source, lines, counts: listedCounts(lines) }));
     return EXIT_OK;
   }
 
@@ -648,6 +752,22 @@ async function list(options: Options, stdout: IngestStream, stderr: IngestStream
   parts.push("nothing was delivered");
   stdout.write(`${parts.join("; ")}\n`);
   return EXIT_OK;
+}
+
+/**
+ * The listing's counterpart to statusCounts. A preview delivers nothing, so
+ * `unparseable` is the only status a listed line can hold — but it is counted
+ * HERE, beside the delivery path's counts, not inside the renderer: a count
+ * computed in the one place that promises not to compute them is the
+ * discipline holding by structure rather than by luck.
+ */
+function listedCounts(lines: ListedLine[]): StatusCounts {
+  return {
+    accepted: 0,
+    refused: 0,
+    undelivered: 0,
+    unparseable: lines.filter((l) => l.problem !== null).length,
+  };
 }
 
 function listedLine(number: number, text: string | null): ListedLine {
