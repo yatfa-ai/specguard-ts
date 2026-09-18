@@ -826,3 +826,426 @@ test("SPGD-1188: --help describes -v, --version and keeps the usage banner", asy
   assert.match(r.stdout, /-v, --version/);
   assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file>/);
 });
+
+// --- SPGD-1226: the refusal parse reaches the report, and --json -------------
+//
+// HTTP 400 is the only PERMANENT verdict in this command's contract — a
+// refused line is refused every time it is offered — so the only way to land
+// the run is to learn which specs the platform objected to. The human line
+// flattens the refusal body to 300 characters; `--json` is the second channel
+// that cap's own grounds hand over: one JSON document on stdout, every reason
+// in it, over the same lines, the same counts and the same exit code.
+
+/** N distinct per-spec refusal errors, as the platform sends them. */
+function detailSpecs(n: number): string[] {
+  return Array.from(
+    { length: n },
+    (_, i) =>
+      `specs[${i}] spec/models/user_spec.rb:${100 + i}: duration must be a non-negative number when present`,
+  );
+}
+
+function parseDocument(stdout: string): Record<string, unknown> {
+  // AC 2's falsifier for today's `Unterminated string in JSON at position 301`:
+  // the WHOLE stdout must parse as one document.
+  return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+test("SPGD-1226: a 400's details array reaches the report — every spec named under --json, the human line still capped", async () => {
+  const specs = detailSpecs(25);
+  const body = JSON.stringify({ error: "bad_request", message: specs[0], details: specs });
+
+  // WITHOUT --json: the human line is byte-for-byte what it has always been —
+  // the flattened refusal fragment, hard-truncated at 300 characters.
+  const srv1 = await captureServer({ status: 400, body });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
+    const r = await runCli([file], srv1.url);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /line 1: refused — HTTP 400 — \{"error"/);
+    assert.ok(r.stdout.includes("specs[0]"));
+    assert.ok(!r.stdout.includes("specs[24]"), "the human line has room for a fragment, not the list");
+    const refusedLine = r.stdout.split("\n")[0] ?? "";
+    assert.ok(
+      refusedLine.endsWith("…"),
+      `the truncation the 300-character cap has always produced: ${refusedLine.slice(-40)}`,
+    );
+    rm(file);
+  } finally {
+    await srv1.close();
+  }
+
+  // WITH --json: one document, every reason, uncapped, in the platform's order.
+  const srv2 = await captureServer({ status: 400, body });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
+    const r = await runCli(["--json", file], srv2.url);
+    assert.equal(r.code, 1, "the exit code is identical with the flag");
+    const doc = parseDocument(r.stdout);
+    assert.equal(doc.tool, "specguard-ingest");
+    assert.equal(doc.mode, "deliver");
+    const line = (doc.lines as Record<string, unknown>[])[0]!;
+    assert.equal(line.status, "refused");
+    assert.equal(line.code, 400);
+    assert.equal(line.test_run_id, null);
+    assert.equal(line.ci_run_id, "17");
+    assert.deepEqual(line.reasons, specs, "every offending spec, no cap, no ellipsis, no truncation");
+    assert.equal((doc.summary as Record<string, unknown>).refused, 1);
+    assert.equal(r.stderr, "");
+    rm(file);
+  } finally {
+    await srv2.close();
+  }
+});
+
+test("SPGD-1226: the --json document carries the published shape over a mixed file", async () => {
+  const specs = detailSpecs(4);
+  const refusedBody = JSON.stringify({ error: "bad_request", message: specs[0], details: specs });
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    { status: 400, body: refusedBody },
+    { status: 401, body: "unauthorized" },
+  ]);
+  try {
+    const file = tmpFile(
+      "q.jsonl",
+      `${runLine("run-1")}\n${runLine("run-2")}\n${runLine("run-3")}\nnot json at all\n`,
+    );
+    const r = await runCli(["--json", file], srv.url);
+    assert.equal(r.code, 2, "2 dominates, with the flag exactly as without");
+    const doc = parseDocument(r.stdout);
+    assert.deepEqual(Object.keys(doc), ["tool", "mode", "file", "summary", "lines", "foldings"]);
+    assert.equal(doc.mode, "deliver");
+    assert.equal(doc.file, file);
+    assert.deepEqual(doc.summary, {
+      lines: 4,
+      attempted: 3,
+      accepted: 1,
+      refused: 1,
+      undelivered: 1,
+      unparseable: 1,
+      blank: 0,
+      skipped: 0,
+      selector: null,
+    });
+    const lines = doc.lines as Record<string, unknown>[];
+    assert.deepEqual(lines[0], {
+      number: 1,
+      status: "accepted",
+      code: 202,
+      reasons: [],
+      test_run_id: "tr_1",
+      ci_run_id: "run-1",
+    });
+    assert.deepEqual(lines[1], {
+      number: 2,
+      status: "refused",
+      code: 400,
+      reasons: specs,
+      test_run_id: null,
+      ci_run_id: "run-2",
+    });
+    // 401: arrived, stored nothing, said nothing readable — reasons [].
+    assert.deepEqual(lines[2], {
+      number: 3,
+      status: "undelivered",
+      code: 401,
+      reasons: [],
+      test_run_id: null,
+      ci_run_id: "run-3",
+    });
+    const unparseable = lines[3] as Record<string, unknown>;
+    assert.equal(unparseable.number, 4);
+    assert.equal(unparseable.status, "unparseable");
+    assert.equal(unparseable.code, null);
+    assert.equal(unparseable.test_run_id, null);
+    assert.equal(unparseable.ci_run_id, null);
+    assert.ok(
+      Array.isArray(unparseable.reasons) &&
+        unparseable.reasons.length === 1 &&
+        String(unparseable.reasons[0]).startsWith("could not parse the line as JSON:"),
+      JSON.stringify(unparseable.reasons),
+    );
+    assert.deepEqual(doc.foldings, []);
+    assert.equal(r.stderr, "", "no warning when the run had results — either renderer");
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1226: foldings render as data — the same observation the text report states as a sentence", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"41f2c9b8"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("17442")}\n${runLine("17442")}\n${runLine("999")}\n`);
+    const r = await runCli(["--json", file], srv.url);
+    assert.equal(r.code, 0);
+    const doc = parseDocument(r.stdout);
+    assert.deepEqual(doc.foldings, [
+      { ci_run_id: "17442", test_run_id: "41f2c9b8", lines: [1, 2] },
+    ]);
+    assert.deepEqual(doc.summary, {
+      lines: 3,
+      attempted: 3,
+      accepted: 3,
+      refused: 0,
+      undelivered: 0,
+      unparseable: 0,
+      blank: 0,
+      skipped: 0,
+      selector: null,
+    });
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1226: a delivery that never got an answer carries code null and the error as its one reason", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
+  try {
+    const r = await runCli(["--json", file], "http://127.0.0.1:1");
+    assert.equal(r.code, 2);
+    const doc = parseDocument(r.stdout);
+    const line = (doc.lines as Record<string, unknown>[])[0]!;
+    assert.equal(line.status, "undelivered");
+    assert.equal(line.code, null, "no answer, no code");
+    const reasons = line.reasons as string[];
+    assert.equal(reasons.length, 1, "the error's rendering is the whole of what there is to say");
+    assert.equal(typeof reasons[0], "string");
+    assert.ok(reasons[0]!.length > 0);
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1226: --list --json lists the envelope facts as values and delivers nothing", async () => {
+  const file = tmpFile(
+    "q.jsonl",
+    `${runLine("17442")}\n{"commit_sha":"abc123"}\nnot json at all\n`,
+  );
+  try {
+    // Deliberately no server: listing needs no credentials, with or without --json.
+    const r = await runCli(["--list", "--json", file]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stderr, "");
+    const doc = parseDocument(r.stdout);
+    assert.equal(doc.mode, "list");
+    assert.deepEqual(doc.summary, {
+      lines: 3,
+      attempted: 0,
+      accepted: 0,
+      refused: 0,
+      undelivered: 0,
+      unparseable: 1,
+      blank: 0,
+      skipped: 0,
+      selector: null,
+    });
+    const lines = doc.lines as Record<string, unknown>[];
+    assert.deepEqual(lines[0], {
+      number: 1,
+      status: "listed",
+      reasons: [],
+      branch: "main",
+      commit_sha: "0d4a1f2c9b8e7d6a5f4c3b2a1908f7e6d5c4b3a2",
+      ci_run_id: "17442",
+      examples: 1,
+      duration_seconds: 1.5,
+    });
+    assert.deepEqual(lines[1], {
+      number: 2,
+      status: "listed",
+      reasons: [],
+      branch: null,
+      commit_sha: "abc123",
+      ci_run_id: null,
+      examples: null,
+      duration_seconds: null,
+    });
+    const unparseable = lines[2] as Record<string, unknown>;
+    assert.equal(unparseable.status, "unparseable");
+    assert.ok(
+      Array.isArray(unparseable.reasons) &&
+        unparseable.reasons.length === 1 &&
+        String(unparseable.reasons[0]).startsWith("could not parse the line as JSON:"),
+    );
+    assert.deepEqual(doc.foldings, []);
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1226: an empty file emits a document under --json — the file was read, and lines [] over zeroes is true", async () => {
+  const empty = tmpFile("e.jsonl", "");
+  try {
+    const run = await runCli(["--json", empty], "http://127.0.0.1:1");
+    assert.equal(run.code, 0);
+    assert.match(run.stderr, /holds no runs to deliver\n$/, "the warning stays on stderr in BOTH renderers");
+    const doc = parseDocument(run.stdout);
+    assert.equal(doc.mode, "deliver");
+    assert.deepEqual(doc.lines, []);
+    assert.deepEqual(doc.foldings, []);
+    assert.deepEqual(doc.summary, {
+      lines: 0,
+      attempted: 0,
+      accepted: 0,
+      refused: 0,
+      undelivered: 0,
+      unparseable: 0,
+      blank: 0,
+      skipped: 0,
+      selector: null,
+    });
+
+    const listed = await runCli(["--list", "--json", empty]);
+    assert.equal(listed.code, 0);
+    assert.match(listed.stderr, /holds no runs to list\n$/);
+    const ldoc = parseDocument(listed.stdout);
+    assert.equal(ldoc.mode, "list");
+    assert.deepEqual(ldoc.lines, []);
+    rm(empty);
+  } finally {
+    rm(empty);
+  }
+});
+
+test("SPGD-1226: a run that never got as far as reading <file> writes no document — bad flag, missing credentials", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
+  try {
+    const badFlag = await runCli(["--dry-runn", "--json", file]);
+    assert.equal(badFlag.code, 2);
+    assert.equal(badFlag.stdout, "", "no document for a run that never read the file");
+
+    const noCreds = await runCli(["--json", file]);
+    assert.equal(noCreds.code, 2);
+    assert.equal(noCreds.stdout, "");
+
+    // --list still needs no credentials under --json: the file most worth
+    // checking is the one written because no key was set.
+    const listed = await runCli(["--list", "--json", file]);
+    assert.equal(listed.code, 0);
+    assert.notEqual(listed.stdout, "");
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1226: the exit code is identical with and without --json, on 0, 1 and 2", async () => {
+  const ok = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const f0 = tmpFile("f0.jsonl", `${runLine("1")}\n`);
+    assert.equal((await runCli([f0], ok.url)).code, 0);
+    assert.equal((await runCli(["--json", f0], ok.url)).code, 0);
+    rm(f0);
+  } finally {
+    await ok.close();
+  }
+
+  const refused = await captureServer({ status: 400, body: "specs is required and must be an array" });
+  try {
+    const f1 = tmpFile("f1.jsonl", `${runLine("1")}\n`);
+    assert.equal((await runCli([f1], refused.url)).code, 1);
+    assert.equal((await runCli(["--json", f1], refused.url)).code, 1);
+    rm(f1);
+  } finally {
+    await refused.close();
+  }
+
+  const f2 = tmpFile("f2.jsonl", `${runLine("1")}\n`);
+  try {
+    assert.equal((await runCli([f2], "http://127.0.0.1:1")).code, 2);
+    assert.equal((await runCli(["--json", f2], "http://127.0.0.1:1")).code, 2);
+  } finally {
+    rm(f2);
+  }
+});
+
+test("SPGD-1226: the summary names the selector only when it demonstrably held something back", async () => {
+  const contents = [1, 2, 3, 4].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    const from = await runCli(["--json", "--from-line", "3", file], "http://127.0.0.1:1");
+    let doc = parseDocument(from.stdout);
+    let summary = doc.summary as Record<string, unknown>;
+    assert.equal(summary.selector, "--from-line");
+    assert.equal(summary.skipped, 2);
+    assert.equal(summary.lines, 2);
+
+    const set = await runCli(["--json", "--lines", "2,4", file], "http://127.0.0.1:1");
+    doc = parseDocument(set.stdout);
+    assert.equal((doc.summary as Record<string, unknown>).selector, "--lines");
+
+    const none = await runCli(["--json", file], "http://127.0.0.1:1");
+    doc = parseDocument(none.stdout);
+    assert.equal((doc.summary as Record<string, unknown>).selector, null);
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1226: blank lines are counted in the document, not dropped, and numbering is the file's", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("1")}\n\n   \n${runLine("2")}\n`);
+    const r = await runCli(["--json", file], srv.url);
+    assert.equal(r.code, 0);
+    const doc = parseDocument(r.stdout);
+    assert.equal((doc.summary as Record<string, unknown>).blank, 2);
+    assert.deepEqual(
+      (doc.lines as { number: number }[]).map((l) => l.number),
+      [1, 4],
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1226: no single-dash parse changed — -j is not a short form, and near-misses are still refused", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  try {
+    const j = await runCli(["-j", file]);
+    assert.equal(j.code, 2);
+    assert.match(j.stderr, /one file at a time, got 2: -j, /);
+
+    for (const flag of ["--jsonx", "--js"]) {
+      const r = await runCli([flag, file]);
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, new RegExp(`invalid option: ${flag}`));
+      assert.equal(r.stdout, "");
+    }
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1226: --version and --help keep short-circuiting before --json is considered", async () => {
+  for (const argv of [["--version", "--json"], ["--json", "--version"]]) {
+    const v = await runCli(argv);
+    assert.equal(v.code, 0);
+    assert.match(v.stdout, /^specguard-ts \d+\.\d+\.\d+\n$/);
+    assert.equal(v.stderr, "");
+  }
+  const h = await runCli(["--help", "--json"]);
+  assert.equal(h.code, 0);
+  assert.match(h.stdout, /Usage: specguard-ingest/);
+
+  // A bare --json with no file is still the no-file UsageError, not a JSON run.
+  const noFile = await runCli(["--json"]);
+  assert.equal(noFile.code, 2);
+  assert.match(noFile.stderr, /no file given — Usage: specguard-ingest/);
+  assert.equal(noFile.stdout, "");
+});
+
+test("SPGD-1226: --help documents --json in its Options block; the banner text is untouched", async () => {
+  const r = await runCli(["--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /  --json            Emit one JSON document on stdout instead of the human report\n/);
+  assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file>/);
+});

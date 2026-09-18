@@ -39,6 +39,47 @@ function oneLine(text: string): string {
 }
 
 /**
+ * The refusal body's per-spec reasons, on exactly the Ruby Transport's
+ * `refusal_reasons` predicates (`lib/specguard/rspec/transport.rb`):
+ *
+ *   - the body must be a JSON **object** — a scalar or an array says nothing
+ *     this tool can name;
+ *   - `details` must be a NON-EMPTY array of ALL strings — the platform sends
+ *     one error per offending spec (`render_bad_request` puts every one of
+ *     them on the wire), and a partial list would under-report;
+ *   - otherwise a `message` string stands alone as the one fallback;
+ *   - anything unreadable degrades silently to `null` — today's raw-text
+ *     `detail` is served unchanged, never a new failure mode.
+ *
+ * The guard sits at the read rather than the call, for the reason the Ruby
+ * method gives: a body that will not parse is not a delivery failure — the
+ * delivery plainly succeeded and was refused — and relabelling a 400 as an
+ * exception would tell the operator something untrue. It covers the empty
+ * body, the HTML a proxy answers a 413 with, a JSON scalar, and anything else
+ * a non-SpecGuard peer might put on the wire.
+ *
+ * Callers hand in the body string they ALREADY read for the `detail` line:
+ * `res.text()` can only be consumed once, so the parse and the one-line
+ * rendering must share one read.
+ */
+export function refusalReasons(bodyText: string): string[] | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+  const details = record.details;
+  if (Array.isArray(details) && details.length > 0 && details.every((d) => typeof d === "string")) {
+    return details as string[];
+  }
+  const message = record.message;
+  return typeof message === "string" ? [message] : null;
+}
+
+/**
  * Deliver one envelope to `<endpoint>/api/v1/ingest`.
  *
  * NEVER THROWS. This is the roadmap's hardest constraint and it outranks
@@ -169,8 +210,14 @@ export interface RawDeliveryDeps {
 export type RawDeliveryResult =
   /** A 2xx. `testRunId` is the 202 body's run id when one was readable. */
   | { outcome: "accepted"; status: number; testRunId: string | null }
-  /** fetch resolved a non-2xx — the endpoint answered without storing. */
-  | { outcome: "http-error"; status: number; detail: string }
+  /**
+   * fetch resolved a non-2xx — the endpoint answered without storing.
+   * `reasons` is the refusal body's per-spec `details` array (or the
+   * `message` fallback), whole and uncapped — the structured half of what
+   * the truncated `detail` line flattens; `null` when the body said nothing
+   * readable. Beside `detail`, never instead of it.
+   */
+  | { outcome: "http-error"; status: number; detail: string; reasons: string[] | null }
   /** The request never got an answer — refused connection, DNS, timeout. */
   | { outcome: "network-error"; detail: string };
 
@@ -214,13 +261,21 @@ export async function deliverRawLine(
       };
     }
 
+    // ONE read of the body: `res.text()` can only be consumed once, so the
+    // flattened `detail` line and the `reasons` parse share the same string.
+    // A body that will not read or parse degrades — `detail` flattens to ""
+    // and `reasons` stays null — never a throw; the never-fail contract
+    // outranks the decoration.
     let detail = "";
+    let reasons: string[] | null = null;
     try {
-      detail = oneLine(await res.text());
+      const body = await res.text();
+      detail = oneLine(body);
+      reasons = refusalReasons(body);
     } catch {
       detail = "";
     }
-    return { outcome: "http-error", status: res.status, detail };
+    return { outcome: "http-error", status: res.status, detail, reasons };
   } catch (err) {
     return { outcome: "network-error", detail: errorMessage(err) };
   }
