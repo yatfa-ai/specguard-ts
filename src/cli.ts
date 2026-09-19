@@ -103,8 +103,11 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
         "                      merge base with the default branch; never a bare\n" +
         "                      working-tree-vs-index diff, which is empty in CI).\n" +
         "                      Untracked files are selected too, so a brand-new\n" +
-        "                      file that has not been git-added is still checked;\n" +
-        "                      gitignored paths never are\n",
+        "                      file that has not been git-added is still checked\n" +
+        "                      (.gitignore keeps paths out of that untracked leg\n" +
+        "                      only; a tracked file is never ignored). Either leg\n" +
+        "                      skips the fixed dependency/build directories\n" +
+        "                      (node_modules, .git, dist, .test-build, coverage).\n",
     );
     stdout.write("\nExit codes: 0 clean (including zero annotations), 1 malformed annotations, 2 could not lint.\n");
     return 0;

@@ -1792,3 +1792,23 @@ test("SPGD-1188: help describes -v, --version and keeps the usage line", () => {
   assert.match(text, /^Usage: specguard lint \[--json\] \[--changed\[=<base>\]\] \[files\.\.\.\]$/m);
   assert.match(text, /-v, --version/);
 });
+
+test("SPGD-1284: help's --changed block names the dependency/build directory fence and drops the false gitignore claim", () => {
+  const out = capture();
+  const err = capture();
+  const exit = runCli(["lint", "--help"], out.stream, err.stream);
+  assert.equal(exit, 0);
+  const text = out.lines.join("");
+  // SPGD-1273 fenced --changed with the fixed directory list on BOTH git
+  // legs; .gitignore only fences the untracked leg, so the pre-1273 clause
+  // "gitignored paths never are [checked]" is false — and this help block is
+  // the one site carrying that claim that the shipped binary prints. The
+  // false clause stays gone and the fence that actually holds is named.
+  assert.doesNotMatch(text, /gitignored paths never are/);
+  assert.match(text, /Either leg\n +skips the fixed dependency\/build directories/);
+  assert.match(text, /node_modules, \.git, dist, \.test-build, coverage/);
+  // The surviving .gitignore mention is scoped to the untracked leg only.
+  assert.match(text, /\.gitignore keeps paths out of that untracked leg\n +only/);
+  // The still-true untracked clause was not deleted wholesale.
+  assert.match(text, /not been git-added is still checked/);
+});
