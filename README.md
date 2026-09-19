@@ -666,9 +666,17 @@ changed files); `--changed=<base>` overrides the base for pipelines that know
 better. Selection also takes in **untracked** files: a brand-new file that has
 not been `git add`ed is part of what changed against the base, whether or not
 the change is committed yet. One `git ls-files --others --exclude-standard`
-call per run is unioned with the diff — `.gitignore`d paths (scratch
-directories, vendored code, build output) never enter the selection — and
-untracked files obey the same scoping as diffed ones, so an untracked file
+call per run is unioned with the diff — `--exclude-standard` keeps
+`.gitignore`d paths (scratch directories, vendored code, build output) out of
+that untracked leg, but a tracked file is never subject to `.gitignore`, so
+the diff leg has no fence of its own. `--changed` therefore applies the same
+fixed directory list the walk skips (`node_modules`, `.git`, `dist`,
+`.test-build`, `coverage`) to every path git hands back, on either leg —
+a directory merely *named after* a fenced word (`src/dist_helpers/`) is
+project code, and so is a file merely named `coverage.ts` — and when the
+fence removed files, the `checked N source files changed since <base>` line
+says `skipping M in dependency or build directories`. Untracked files obey
+the same scoping as diffed ones, so an untracked file
 outside the current directory is counted as outside, not checked. When the
 untracked leg contributed, the `checked N source files changed since <base>`
 line says `including M untracked`. Outside a git repository, or with no
