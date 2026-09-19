@@ -93,18 +93,22 @@ function aboutFile(kind: string | null): boolean {
  * Names the filter that actually emptied a `--changed` selection. Saying
  * "nothing in the diff matched" when an annotated file demonstrably changed —
  * just not under this directory — is worse than saying nothing: it reads as a
- * conclusion and stops the reader looking. `outsideRoot` and `unreadable`
- * are independent counters over disjoint branches of the same partition, so
- * both can be positive at once and the clauses are additive — naming only
- * the first would leave the reader doing arithmetic and concluding the
- * missing files were checked (the Ruby client's `changed_empty_reason` /
- * `changed_excluded_reason` ported verbatim in structure).
+ * conclusion and stops the reader looking. `outsideRoot`, `unreadable` and
+ * the directory-fence count are independent counters over disjoint branches
+ * of the same partition, so any of them can be positive at once and the
+ * clauses are additive — naming only the first would leave the reader doing
+ * arithmetic and concluding the missing files were checked (the Ruby client's
+ * `changed_empty_reason` / `changed_excluded_reason` ported verbatim in
+ * structure). The fence count rides `FileSelection.skipped`, not
+ * `ChangedStats`: it is report context for a selection that may be perfectly
+ * full, not an emptiness explanation.
  */
 function changedEmptyReason(selection: FileSelection): string {
   // Invariant: selectChanged is the only producer of mode "changed" and it
   // always populates base and stats.
   const stats = selection.stats!;
   const base = selection.base!;
+  const skipped = selection.skipped;
 
   if (stats.changed === 0) return `nothing changed against ${base}`;
   if (stats.matches === 0) {
@@ -116,13 +120,26 @@ function changedEmptyReason(selection: FileSelection): string {
 
   const matched =
     `${stats.matches} changed annotated-source file${stats.matches === 1 ? "" : "s"} against ${base}`;
-  if (stats.outsideRoot === 0) return `${matched} could not be read`;
-
-  let reason =
-    `${matched}, but ${stats.outsideRoot} ${stats.outsideRoot === 1 ? "is" : "are"} outside ` +
-    `${process.cwd()} (--changed selects only files under the current directory)`;
-  if (stats.unreadable > 0) reason += ` and ${stats.unreadable} could not be read`;
-  return reason;
+  if (stats.outsideRoot > 0) {
+    let reason =
+      `${matched}, but ${stats.outsideRoot} ${stats.outsideRoot === 1 ? "is" : "are"} outside ` +
+      `${process.cwd()} (--changed selects only files under the current directory)`;
+    if (stats.unreadable > 0) reason += ` and ${stats.unreadable} could not be read`;
+    if (skipped > 0) reason += ` and ${skipped} in dependency or build directories`;
+    return reason;
+  }
+  if (stats.unreadable > 0 && skipped > 0) {
+    return `${matched} could not be read and ${skipped} in dependency or build directories`;
+  }
+  if (skipped > 0) {
+    // Every matching file the diff and the untracked leg produced was
+    // fenced: the shape the Ruby twin uses, in this mode's vocabulary.
+    return `${matched}, all in dependency or build directories`;
+  }
+  // Nothing outside the root and nothing fenced: `unreadable` is then the
+  // only filter left that can have emptied the selection, so it needs no
+  // count of its own.
+  return `${matched} could not be read`;
 }
 
 /**

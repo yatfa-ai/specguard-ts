@@ -943,6 +943,157 @@ test("the changed-mode name union is built size-safely — it must hold where sp
 });
 
 // ---------------------------------------------------------------------------
+// SPGD-1273: the changed-mode directory fence. `--changed` — the mode the
+// README documents as CI selection — applied NO fence at all:
+// `SKIPPED_DIRECTORIES` was applied only inside walk()'s directory
+// recursion, and the false premise "`--exclude-standard` is the boundary"
+// was written into three prose surfaces. It structurally cannot carry that
+// boundary: it is an argument to `git ls-files --others` and exists only on
+// the untracked leg, while git never applies ignore rules to tracked files —
+// so a dependency-bump PR that commits a vendored file was failed over code
+// the user did not write and cannot edit. The fence now applies to the
+// materialized union inside selectChanged's loop — ONE placement covers both
+// legs — the removal count rides `FileSelection.skipped`, the checked-count
+// line discloses it count-gated, and a fence-emptied selection names the
+// fence instead of a wrong cause. Fence directory names are spelled as
+// literals below: a pin reading its expectation off `SKIPPED_DIRECTORIES`
+// could never fail.
+// ---------------------------------------------------------------------------
+
+test("a tracked annotated file under a fenced directory is excluded from the DIFF leg, and the removal is counted", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.mkdirSync(path.join(f.root, "dist/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "dist/generated/bundle.js"), BAD_ANNOTATION);
+  fs.mkdirSync(path.join(f.root, "coverage/lcov-report"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "coverage/lcov-report/prettify.js"), BAD_ANNOTATION);
+  commitAll(f, "commit build output carrying malformed annotations");
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  // `untracked === 0` proves the fenced files arrived via the DIFF leg: the
+  // leg `.gitignore`/`--exclude-standard` never touches — these files are
+  // committed, and nothing here ignores `dist/` or `coverage/`. Before the
+  // fence this exact tree selected all three and failed the run.
+  assert.deepEqual(
+    selection.stats,
+    { changed: 3, matches: 3, outsideRoot: 0, unreadable: 0, untracked: 0 },
+  );
+  assert.equal(selection.skipped, 2);
+});
+
+test("an untracked annotated file under a fenced directory is excluded even where no .gitignore covers it", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  // No .gitignore covers dist/: `--exclude-standard` leaves the file on the
+  // untracked leg, so the fence — not git — is what removes it.
+  fs.mkdirSync(path.join(f.root, "dist/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "dist/generated/untracked.js"), BAD_ANNOTATION);
+  // Precondition: the file demonstrably entered the union (git offers it).
+  assert.match(
+    git(f.root, "ls-files", "--others", "--exclude-standard"),
+    /dist\/generated\/untracked\.js/,
+  );
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  // Counted in `matches` — it entered the union and was removed by the
+  // fence, never absent from it — and `untracked` reads 0 because leg
+  // attribution happens at selection, after the fence arm.
+  assert.equal(selection.stats?.matches, 2);
+  assert.equal(selection.stats?.untracked, 0);
+  assert.equal(selection.skipped, 1);
+});
+
+test("the fence matches whole segments and never the basename: src/dist_helpers/a.ts and src/coverage.ts are still selected", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.mkdirSync(path.join(f.root, "src/dist_helpers"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "src/dist_helpers/a.ts"), GOOD_ANNOTATION);
+  fs.writeFileSync(path.join(f.root, "src/coverage.ts"), GOOD_ANNOTATION);
+  commitAll(f, "project code whose names merely resemble fenced words");
+
+  const selection = selectFiles([], f.root, { changed: true });
+  // A substring or basename-inclusive match would fence both of these.
+  assert.deepEqual(selection.files, ["src/coverage.ts", "src/dist_helpers/a.ts"]);
+  assert.equal(selection.skipped, 0);
+});
+
+test("a zero-fence changed selection is unchanged, and the skipped count defaults to 0 at every construction site", () => {
+  // Mixed-shape changed run with nothing fenced: both legs contribute, the
+  // count reads 0.
+  const mixed = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(mixed, "base");
+  git(mixed.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(mixed.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(mixed.root, "src/new.ts"), GOOD_ANNOTATION);
+  const selection = selectFiles([], mixed.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts", "src/new.ts"]);
+  assert.equal(selection.skipped, 0);
+
+  // `skipped` follows the `base`/`note`/`stats` precedent: defaulted 0 at
+  // the walk and explicit sites, which never count a file-level removal.
+  assert.equal(selectFiles([], mixed.root).skipped, 0);
+  assert.equal(selectFiles(["src/a.ts"], mixed.root).skipped, 0);
+});
+
+test("a changed run whose fence removed files discloses the count on the checked-count line; the json selection block keeps its shape", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.mkdirSync(path.join(f.root, "dist/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "dist/generated/bundle.js"), BAD_ANNOTATION);
+  commitAll(f, "touch src, commit a vendored file");
+
+  const binary = stubBackend([{ file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] }], 1);
+  const report = inRepo(f, [], binary, { changed: true });
+  assert.equal(report.exitCode, EXIT_OK);
+  const human = renderHuman(report);
+  // Count-gated exactly like the `including N untracked` clause beside it.
+  assert.match(
+    human,
+    /checked 1 source file changed since \S+ skipping 1 in dependency or build directories/,
+  );
+
+  // The json selection block keeps its exact shape (mode, base, note) — the
+  // disclosure rides the human line (and json-mode's stderr bridge), not a
+  // new document key.
+  const json = JSON.parse(renderJson(report)) as { selection?: Record<string, unknown> };
+  assert.deepEqual(Object.keys(json.selection ?? {}), ["mode", "base", "note"]);
+});
+
+test("a changed selection emptied entirely by the fence reports the fence, not a wrong cause", () => {
+  // Every matching file the diff produced lives under dist/: before the
+  // honest reason this fell through the ladder to "could not be read" —
+  // a conclusion that stops the reader looking, the exact failure the
+  // empty-reason ladder exists to prevent.
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.mkdirSync(path.join(f.root, "dist/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "dist/generated/bundle.js"), BAD_ANNOTATION);
+  commitAll(f, "only build output changed");
+
+  const cli = runCliInRepo(f, ["lint", "--changed"]);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.match(
+    cli.stderr,
+    /selected 0 annotated source files — 1 changed annotated-source file against \S+, all in dependency or build directories/,
+  );
+  assert.ok(!cli.stderr.includes("nothing changed against"), cli.stderr);
+  assert.ok(!cli.stderr.includes("none matching the annotated extensions"), cli.stderr);
+  assert.ok(!cli.stderr.includes("could not be read"), cli.stderr);
+  // And the checked-count line discloses the removal beside the reason.
+  assert.match(cli.stdout, /skipping 1 in dependency or build directories/);
+});
+
+// ---------------------------------------------------------------------------
 // SPGD-1144: the selection sentence under `--json`. The provenance line the
 // human report writes was constructed inside renderHuman only, so a json-mode
 // `--changed` run named its selection nowhere a machine can read: the document

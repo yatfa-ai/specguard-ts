@@ -104,6 +104,14 @@ export interface FileSelection {
   /** `changed` mode: the filter counters behind an empty selection. Null in
    * the other modes. */
   stats: ChangedStats | null;
+  /** How many matched files the `SKIPPED_DIRECTORIES` fence removed from this
+   * selection — `changed` mode's count over the diff+untracked union (see
+   * `selectChanged`). 0 in the other modes: the walk fences at the directory
+   * entry during recursion (so it never counts a file-level removal) and an
+   * explicit list is checked as given, bypassing the fence entirely. A fence
+   * that removes files must say so — this count is what the report's
+   * disclosure clause reads, so the narrowing is never silent. */
+  skipped: number;
 }
 
 /** Options for `selectFiles` beyond the positional paths. */
@@ -154,6 +162,25 @@ function isAnnotatedSource(file: string): boolean {
 }
 
 /**
+ * Whether a root-relative path runs through a `SKIPPED_DIRECTORIES`
+ * directory. Whole segments only — `path.sep`-delimited — so a directory
+ * merely *named after* a fenced word (`src/dist_helpers/`) is project code,
+ * not fenced, and the basename is excluded from the segment set: a path's
+ * last component is the file itself, so `src/coverage.ts` is selected
+ * whatever its name contains. The same grain the Ruby twin's
+ * `skipped_directory?` decides at (`file_selector.rb`), and a different
+ * shape from `walk()`'s application of the same set: the walk fences at the
+ * directory entry during recursion, while `--changed` receives paths from
+ * git and must decide on the root-relative path — this predicate is the
+ * set's second application site, and the first path-level one.
+ */
+function skippedDirectory(relative: string): boolean {
+  const segments = relative.split(path.sep);
+  segments.pop();
+  return segments.some((segment) => SKIPPED_DIRECTORIES.has(segment));
+}
+
+/**
  * Select in-scope files. Explicit paths are checked AS GIVEN (a named
  * non-annotated extension is a usage error, not silently skipped — the same
  * anti-quiet-no-op rule the Ruby client's `--changed`/files combination
@@ -192,7 +219,7 @@ export function selectFiles(
         throw new LintUsageError(`${p} is a directory; name files or run without paths`);
       }
     }
-    return { files: [...paths], mode: "explicit", base: null, note: null, stats: null };
+    return { files: [...paths], mode: "explicit", base: null, note: null, stats: null, skipped: 0 };
   }
 
   if (options.changed) return selectChanged(root, options.base);
@@ -215,7 +242,7 @@ export function selectFiles(
     }
   };
   walk(root);
-  return { files, mode: "walk", base: null, note: null, stats: null };
+  return { files, mode: "walk", base: null, note: null, stats: null, skipped: 0 };
 }
 
 /**
@@ -246,7 +273,11 @@ export function selectFiles(
  *     committed yet" — the mode's own promise — and a diff-only name set
  *     would ride it past the gate behind a non-empty checked-count in the
  *     mixed shape every real working tree has. `--exclude-standard` is the
- *     boundary: `.gitignore`d paths never enter the selection. The legs are
+ *     untracked leg's boundary: `.gitignore`d paths never enter through it.
+ *     It is a second removal, never the selection's only fence: ignored
+ *     *tracked* paths still arrive on the diff leg (git never applies ignore
+ *     rules to tracked files), which is why the `SKIPPED_DIRECTORIES` fence
+ *     applies to the union as a whole. The legs are
  *     disjoint by construction (an untracked path is never a diff path), so
  *     the union cannot double-count and needs no dedup. No history is
  *     consulted, so the leg works in a shallow clone, and a failed call
@@ -291,6 +322,7 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
   let outsideRoot = 0;
   let unreadable = 0;
   let untracked = 0;
+  let skipped = 0;
   for (const { name, untracked: fromUntrackedLeg } of matches) {
     const absolute = path.join(topDir, name);
     const relative = path.relative(rootReal, absolute);
@@ -303,6 +335,17 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
       // source git still listed): counted, never selected — the same
       // partition the Ruby selector reports.
       unreadable += 1;
+    } else if (skippedDirectory(relative)) {
+      // The same SKIPPED_DIRECTORIES fence walk() applies, decided on the
+      // root-relative path at the same segment grain. It sits after the
+      // scoping arms so it counts a different exclusion and never perturbs
+      // `outsideRoot`/`unreadable`; because the union is already materialized
+      // here, one placement covers BOTH legs — the diff leg (where
+      // `.gitignore` cannot act, git never applies ignore rules to tracked
+      // files) and the untracked leg on a repository that does not ignore
+      // its vendored tree. The count rides `FileSelection.skipped` so the
+      // report can disclose the narrowing instead of doing it silently.
+      skipped += 1;
     } else {
       files.push(relative);
       if (fromUntrackedLeg) untracked += 1;
@@ -322,6 +365,7 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
       unreadable,
       untracked,
     },
+    skipped,
   };
 }
 
@@ -431,8 +475,12 @@ function diffNames(base: string, root: string, isShallow: () => boolean): string
 /** The untracked leg of the `--changed` name set: `git ls-files --others
  * --exclude-standard -z`, run at the toplevel so its repo-root-relative
  * output shares the diff leg's coordinate space. `--exclude-standard` is the
- * `.gitignore` boundary (scratch directories, vendored code, build output
- * never enter the selection); `-z` for the same quotePath reasons as the
+ * untracked leg's `.gitignore` boundary (scratch directories, vendored code,
+ * build output never enter through it) — a second removal beside the
+ * `SKIPPED_DIRECTORIES` fence the selection loop applies to the union, never
+ * a substitute for it: a tracked file is never subject to `.gitignore`, so
+ * the diff leg arrives unfenced by this flag whatever it ignores;
+ * `-z` for the same quotePath reasons as the
  * diff leg; no history is consulted, so the leg works in a shallow clone. A
  * failed call degrades to an empty leg rather than killing a run the tracked
  * diff already serves — git says nothing, so the union is the diff alone. */

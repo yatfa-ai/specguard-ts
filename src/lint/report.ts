@@ -43,9 +43,18 @@ export function provenanceLine(files: number, selection: FileSelection | null): 
     selection?.mode === "changed" && (selection.stats?.untracked ?? 0) > 0
       ? ` including ${selection.stats?.untracked} untracked`
       : "";
+  // The directory fence names itself the same way: both clauses are
+  // count-gated, so a run whose fence removed nothing prints byte-identically
+  // to before the fence existed — and a fence that DID remove files never
+  // narrows the selection silently. The count rides `FileSelection.skipped`
+  // (`discover.ts`), the same number the changed-mode empty reason reads.
+  const skippedClause =
+    (selection?.skipped ?? 0) > 0
+      ? ` skipping ${selection?.skipped} in dependency or build directories`
+      : "";
   return (
     `specguard lint: checked ${files} source file${files === 1 ? "" : "s"}` +
-    changedSince + untrackedClause
+    changedSince + untrackedClause + skippedClause
   );
 }
 
