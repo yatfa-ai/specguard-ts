@@ -12,6 +12,7 @@ import {
   changedNameUnion,
   scanTokens,
   escapeGlob,
+  LintUsageError,
   SCAN_MAX_BYTES,
 } from "../src/lint/index.js";
 import { SCHEMA_CONTRACT_DIGEST, VALIDATE_INTENT_ENV_VAR } from "../src/core/validator.js";
@@ -110,6 +111,74 @@ test("discovery walks only annotated extensions and skips dependency directories
 
 test("explicit selection refuses a non-annotated extension instead of silently skipping it", () => {
   assert.throws(() => selectFiles(["README.md"]), /not an annotated source file/);
+});
+
+/** Assert `fn` raises a `LintUsageError` carrying exactly `message`. */
+function assertUsageError(fn: () => unknown, message: string): void {
+  assert.throws(fn, (error: unknown) => {
+    assert.ok(error instanceof LintUsageError, `expected LintUsageError, got ${String(error)}`);
+    assert.equal(error.message, message);
+    return true;
+  });
+}
+
+test("explicit selection refuses a DIRECTORY as a directory, not as a bad extension", () => {
+  // `specguard lint src` is the likeliest user mistake, and the extension
+  // sentence is false about it: `src` is not a source file of the wrong
+  // suffix, it is a directory. `path.extname` of an ordinary directory is
+  // `""`, so an extension-first order answers every directory with the
+  // wrong remedy — the directory refusal has to be asked first.
+  const f = makeRepo({ "src/a.ts": GOOD_ANNOTATION, "weird.ts/b.ts": GOOD_ANNOTATION });
+  const previous = process.cwd();
+  process.chdir(f.root);
+  try {
+    assertUsageError(
+      () => selectFiles(["src"]),
+      "src is a directory; name files or run without paths",
+    );
+    // A directory NAMED with an annotated extension was the only arm the
+    // guard could reach before; it must keep reaching it.
+    assertUsageError(
+      () => selectFiles(["weird.ts"]),
+      "weird.ts is a directory; name files or run without paths",
+    );
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("a nonexistent named path is not a directory: the extension answer survives, and an annotated one still falls through", () => {
+  // The statSync failure arm must FALL THROUGH to the extension guard, not
+  // skip the iteration. Skipping would make `lint nonexistent.md` stop
+  // being a usage error and quietly reach the binary instead.
+  const f = makeRepo({ "src/a.ts": GOOD_ANNOTATION });
+  const previous = process.cwd();
+  process.chdir(f.root);
+  try {
+    assert.throws(
+      () => selectFiles(["nonexistent.md"]),
+      /nonexistent\.md is not an annotated source file \(/,
+    );
+    // An annotated extension that does not resolve is NOT a usage error —
+    // it is selected as given and the read finding belongs to the binary.
+    const selection = selectFiles(["nonexistent.ts"]);
+    assert.equal(selection.mode, "explicit");
+    assert.deepEqual(selection.files, ["nonexistent.ts"]);
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("the CLI exits 2 on a directory argument and says it is a directory", () => {
+  const f = makeRepo({ "src/a.ts": GOOD_ANNOTATION });
+  const cli = runCliInRepo(f, ["lint", "src"]);
+  assert.equal(cli.exit, EXIT_MISUSE);
+  assert.equal(cli.stdout, "");
+  assert.match(
+    cli.stderr,
+    /specguard lint: error: src is a directory; name files or run without paths/,
+  );
+  assert.doesNotMatch(cli.stderr, /not an annotated source file/);
 });
 
 test("escapeGlob neutralizes glob metacharacters so a path matches only itself", () => {
