@@ -129,7 +129,9 @@ function changedEmptyReason(selection: FileSelection): string {
     return reason;
   }
   if (stats.unreadable > 0 && skipped > 0) {
-    return `${matched} could not be read and ${skipped} in dependency or build directories`;
+    // Both causes at once, so `matched` is their sum — the bare prefix
+    // is true only on the solo arms below, where it equals the one counter.
+    return `${matched}, but ${stats.unreadable} could not be read and ${skipped} in dependency or build directories`;
   }
   if (skipped > 0) {
     // Every matching file the diff and the untracked leg produced was
