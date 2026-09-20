@@ -1093,6 +1093,43 @@ test("a changed selection emptied entirely by the fence reports the fence, not a
   assert.match(cli.stdout, /skipping 1 in dependency or build directories/);
 });
 
+// SPGD-1295's arithmetic pin, mirroring the Ruby twin's landed SPGD-1293
+// shape: with BOTH causes present the sentence names each with its own
+// count and the counts SUM to the matched total — the pre-fix sentence
+// prefixed the matched count onto the unreadable clause and read
+// "5 … could not be read and 3 in dependency" against 5 matched files.
+// The lopsided 2/3 counts also catch a swap of the two counters, which an
+// equal-count fixture cannot distinguish.
+test("a changed selection emptied by both the unreadable files and the fence carries each cause's own count", () => {
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  // Two dangling symlinks (the `unreadable` branch — matched, in-root, and
+  // not an existing regular file) and three vendored sources (the fence
+  // branch), all under the repo root so `outsideRoot` stays at zero — the
+  // two-cause arm, with counts too lopsided to alias.
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "src/broken_one.ts"));
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "src/broken_two.ts"));
+  fs.mkdirSync(path.join(f.root, "dist/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "dist/generated/gen_zero.js"), BAD_ANNOTATION);
+  fs.writeFileSync(path.join(f.root, "dist/generated/gen_one.js"), BAD_ANNOTATION);
+  fs.writeFileSync(path.join(f.root, "dist/generated/gen_two.js"), BAD_ANNOTATION);
+  commitAll(f, "add broken symlink sources and generated sources");
+
+  const cli = runCliInRepo(f, ["lint", "--changed"]);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.match(
+    cli.stderr,
+    /selected 0 annotated source files — 5 changed annotated-source files against \S+, but 2 could not be read and 3 in dependency or build directories/,
+  );
+  // Negative matcher on the defective junction: the matched total followed
+  // straight by "could not be read" is the pre-fix lie (5 could not be
+  // read), never the corrected sentence's shape.
+  assert.doesNotMatch(cli.stderr, /against \S+ could not be read and 3 in dependency/);
+  // And the checked-count line discloses the fence's share beside the reason.
+  assert.match(cli.stdout, /skipping 3 in dependency or build directories/);
+});
+
 // ---------------------------------------------------------------------------
 // SPGD-1144: the selection sentence under `--json`. The provenance line the
 // human report writes was constructed inside renderHuman only, so a json-mode
