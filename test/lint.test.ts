@@ -1130,6 +1130,76 @@ test("a changed selection emptied by both the unreadable files and the fence car
   assert.match(cli.stdout, /skipping 3 in dependency or build directories/);
 });
 
+// SPGD-1309's two remaining empty-reason pins. The outsideRoot arm builds its
+// sentence by APPENDING the other two causes (`if (stats.unreadable > 0) …`,
+// `if (skipped > 0) …`), and the ladder's last arm names the unreadable count
+// with no appendage at all — three optional pieces of the same sentence
+// family, none of which had a driver: deleting either appendage, or renaming
+// the fall-through's phrase, left the whole suite green. The omission
+// direction is the one the call site's contract forbids: a sentence that
+// names one cause and silently drops the others reads as a conclusion and
+// stops the reader looking, the exact arithmetic deception SPGD-1293/1295
+// already fixed one arm over.
+test("a changed selection excluded by all three causes names each one with its own count", () => {
+  const f = initRepo({
+    "packages/app/src/a.ts": GOOD_ANNOTATION,
+    "other/b.ts": GOOD_ANNOTATION,
+  });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  // One annotated file outside the run directory (the `outsideRoot` branch),
+  // two dangling symlinks inside it (the `unreadable` branch: matched,
+  // in-root, and not an existing regular file), and three vendored sources
+  // (the fence branch). Counts are lopsided 1/2/3 so a swap of any two
+  // counters cannot alias — the lesson SPGD-1295's own 2/3 fixture carried.
+  fs.writeFileSync(path.join(f.root, "other/b.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "packages/app/src/broken_one.ts"));
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "packages/app/src/broken_two.ts"));
+  fs.mkdirSync(path.join(f.root, "packages/app/dist/generated"), { recursive: true });
+  for (const name of ["gen_zero.js", "gen_one.js", "gen_two.js"]) {
+    fs.writeFileSync(path.join(f.root, "packages/app/dist/generated", name), BAD_ANNOTATION);
+  }
+  commitAll(f, "touch other/, add broken symlink sources and generated sources");
+
+  const cli = runCliInRepo(f, ["lint", "--changed"], path.join(f.root, "packages/app"));
+  assert.equal(cli.exit, EXIT_OK);
+  // All three clauses, each carrying its OWN count, in the ladder's order —
+  // and the three counts sum to the matched total (1 + 2 + 3 === 6).
+  assert.match(
+    cli.stderr,
+    /selected 0 annotated source files — 6 changed annotated-source files against \S+, but 1 is outside \S+ \(--changed selects only files under the current directory\) and 2 could not be read and 3 in dependency or build directories/,
+  );
+  // And the checked-count line discloses the fence's share beside the reason.
+  assert.match(cli.stdout, /skipping 3 in dependency or build directories/);
+});
+
+test("a changed selection emptied only by unreadable files names that cause alone", () => {
+  // The ladder's fall-through: nothing outside the root and nothing fenced,
+  // so `unreadable` is the only filter left and the sentence carries no
+  // appended clause. Its phrasing is load-bearing all the same — this is the
+  // arm every other arm's negative matcher is written against.
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "src/broken_one.ts"));
+  fs.symlinkSync("missing_target.ts", path.join(f.root, "src/broken_two.ts"));
+  commitAll(f, "add broken symlink sources only");
+
+  const cli = runCliInRepo(f, ["lint", "--changed"]);
+  assert.equal(cli.exit, EXIT_OK);
+  assert.match(
+    cli.stderr,
+    /selected 0 annotated source files — 2 changed annotated-source files against \S+ could not be read/,
+  );
+  // Negative matchers on the neighbouring arms: this sentence must not drift
+  // into a shape that names a cause this run does not have.
+  assert.ok(!cli.stderr.includes("in dependency or build directories"), cli.stderr);
+  assert.ok(!cli.stderr.includes("is outside"), cli.stderr);
+  assert.ok(!cli.stderr.includes("are outside"), cli.stderr);
+  // Nothing was fenced, so the checked-count line carries no skip disclosure.
+  assert.ok(!cli.stdout.includes("skipping"), cli.stdout);
+});
+
 // ---------------------------------------------------------------------------
 // SPGD-1144: the selection sentence under `--json`. The provenance line the
 // human report writes was constructed inside renderHuman only, so a json-mode
