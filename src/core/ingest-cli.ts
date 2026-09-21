@@ -318,6 +318,19 @@ function parseOptions(argv: string[]): Options | null {
       i += 1;
       if (arg === "--from-line") fromLine = parseFromLine(value);
       else lineSet = parseLineSet(value);
+    } else if (arg.startsWith("--from-line=")) {
+      // The attached form of the same flag, not a second flag: it slices the
+      // value and hands it to the SAME validator, so every malformed-spec
+      // message is byte-identical to the space form, and last-wins and the
+      // mutual-exclusion check below keep working because both forms write
+      // the one variable. The "=" is matched EXPLICITLY — a bare
+      // startsWith("--from-line") would swallow --from-linex=3, which is a
+      // typo and must stay an `invalid option`. Mirrors src/cli.ts's
+      // --changed= arm, and matches the Ruby twin, whose OptionParser
+      // accepts --flag=value as a matter of course.
+      fromLine = parseFromLine(arg.slice("--from-line=".length));
+    } else if (arg.startsWith("--lines=")) {
+      lineSet = parseLineSet(arg.slice("--lines=".length));
     } else if (arg.startsWith("--")) {
       throw new UsageError(`invalid option: ${arg}`);
     } else {

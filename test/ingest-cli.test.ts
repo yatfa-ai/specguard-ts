@@ -393,6 +393,120 @@ test("malformed selectors are each a 2 naming what was wrong — never a fallbac
   }
 });
 
+// --- SPGD-1341: the attached (--flag=value) form of the two selectors -------
+
+test("SPGD-1341: --from-line=N and --lines=SPEC produce byte-identical output to the space form", async () => {
+  const contents = [1, 2, 3, 4].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    const eqFrom = await runCli(["--list", "--from-line=3", file]);
+    const spFrom = await runCli(["--list", "--from-line", "3", file]);
+    assert.equal(eqFrom.code, 0);
+    assert.equal(eqFrom.stdout, spFrom.stdout);
+    assert.equal(eqFrom.stderr, spFrom.stderr);
+    // Not redundant beside the equality above: two empty streams would compare
+    // equal, so this proves the compared output is the real selection summary.
+    assert.match(eqFrom.stdout, /2 earlier lines skipped by --from-line/);
+
+    const eqSet = await runCli(["--list", "--lines=2,4", file]);
+    const spSet = await runCli(["--list", "--lines", "2,4", file]);
+    assert.equal(eqSet.code, 0);
+    assert.equal(eqSet.stdout, spSet.stdout);
+    assert.equal(eqSet.stderr, spSet.stderr);
+    assert.match(eqSet.stdout, /2 lines not selected by --lines/);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1341: a malformed spec in the attached form keeps the space form's message and its 2", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  // Each pair is the SAME spec typed both ways: the attached form must route
+  // into the same validator, so stderr is compared to the space form rather
+  // than to a pattern copied by hand.
+  const pairs: [string[], string[]][] = [
+    [["--lines=0"], ["--lines", "0"]],
+    [["--lines=5-2"], ["--lines", "5-2"]],
+    [["--lines=abc"], ["--lines", "abc"]],
+    [["--lines=3,,"], ["--lines", "3,,"]],
+    [["--from-line=0"], ["--from-line", "0"]],
+    [["--from-line=twelve"], ["--from-line", "twelve"]],
+  ];
+  try {
+    for (const [attached, spaced] of pairs) {
+      const eq = await runCli([...attached, file], "http://127.0.0.1:1");
+      const sp = await runCli([...spaced, file], "http://127.0.0.1:1");
+      assert.equal(eq.code, 2, `expected 2 for: ${attached.join(" ")}`);
+      assert.equal(eq.stderr, sp.stderr, `message drifted for: ${attached.join(" ")}`);
+    }
+    // The empty value is not a special case: it routes into the same
+    // validator and gets the same naming refusal, never a whole-file fallback.
+    const empty = await runCli(["--from-line=", file], "http://127.0.0.1:1");
+    assert.equal(empty.code, 2);
+    assert.match(empty.stderr, /--from-line wants a line number, got ""/);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1341: the attached form is still refused when both selectors are given", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  try {
+    const r = await runCli(["--from-line=5", "--lines=3,7", file]);
+    assert.equal(r.code, 2);
+    assert.match(
+      r.stderr,
+      /--from-line and --lines both choose which lines to send; give one or the other/,
+    );
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1341: a near-miss flag with an attached value is NOT swallowed by the selector arms", async () => {
+  // The teeth of the fix: a prefix match WITHOUT the "=" would accept every
+  // one of these as a selector. Each must stay an `invalid option`.
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  const flags = [
+    "--from-linex=3",
+    "--from-line-x=3",
+    "--linesx=2",
+    "--lines-set=2",
+    "--from",
+    "--lin",
+  ];
+  try {
+    for (const flag of flags) {
+      const r = await runCli([flag, file], "http://127.0.0.1:1");
+      assert.equal(r.code, 2, `expected 2 for: ${flag}`);
+      assert.match(r.stderr, new RegExp(`invalid option: ${flag}`));
+      assert.equal(r.stdout, "");
+    }
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1341: last-wins holds across the two forms, in both directions", async () => {
+  const contents = [1, 2, 3, 4].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    const lines = await runCli(["--list", "--lines=1,2", "--lines", "4", file]);
+    assert.equal(lines.code, 0);
+    assert.ok(!lines.stdout.includes("run-1"));
+    assert.ok(!lines.stdout.includes("run-2"));
+    assert.ok(lines.stdout.includes("run-4"));
+
+    const from = await runCli(["--list", "--from-line", "2", "--from-line=3", file]);
+    assert.equal(from.code, 0);
+    assert.ok(!from.stdout.includes("run-1"));
+    assert.ok(!from.stdout.includes("run-2"));
+    assert.ok(from.stdout.includes("run-3"));
+  } finally {
+    rm(file);
+  }
+});
+
 test("whitespace between --lines entries is allowed; inside one it is a typo", async () => {
   const contents = [1, 2, 3].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
   const file = tmpFile("q.jsonl", contents);
