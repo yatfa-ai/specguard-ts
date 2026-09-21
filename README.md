@@ -203,8 +203,13 @@ re-sent — the numbering never shifts:
 ```bash
 specguard-ingest --from-line 7 log/test_results.jsonl     # a suffix: skip lines 1-6
 specguard-ingest --lines 3,7,12-15 log/test_results.jsonl # an explicit set over the same numbering
+specguard-ingest --from-line=7 log/test_results.jsonl     # the attached form, identical in every way
 ```
 
+- **Both forms are accepted for both flags** — `--from-line 7` and `--from-line=7`, `--lines 3,7` and
+  `--lines=3,7` — and they are the same flag, not two: the attached form routes into the same validator,
+  so every message, exit code and repeat/exclusion rule below applies to it unchanged. A near-miss like
+  `--from-linex=3` is still an `invalid option` (exit `2`); only the exact name plus `=` is the flag.
 - `--from-line N` is a suffix (N ≥ 1); `--lines` takes numbers and ranges — kept as ranges, never
   expanded — over the file's own numbering. Both compose with `--list`, which then previews exactly the
   set a delivery would send.
