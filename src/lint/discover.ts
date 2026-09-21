@@ -204,19 +204,32 @@ export function selectFiles(
       );
     }
     for (const p of paths) {
+      // The directory question is asked FIRST, and the order is the whole
+      // point: `path.extname` of an ordinary directory is `""`, so an
+      // extension pre-check answers `src` with "not an annotated source
+      // file" — false, and it sends the user after an extension when the
+      // remedy is "name files or run without paths". The Ruby twin refuses
+      // directories at this branch with this same sentence and carries no
+      // suffix pre-check at all (`cli.rb` `select`); this is that shape.
+      let stat: fs.Stats | null = null;
+      try {
+        stat = fs.statSync(p);
+      } catch {
+        // A nonexistent or unreadable named path is the BINARY's read
+        // finding, not ours — so it is not a directory refusal. It must
+        // still FALL THROUGH to the extension guard below rather than skip
+        // the iteration: `lint nonexistent.md` is a usage error about the
+        // extension whether or not the path resolves, and a `continue` here
+        // would silently drop that answer.
+        stat = null;
+      }
+      if (stat?.isDirectory()) {
+        throw new LintUsageError(`${p} is a directory; name files or run without paths`);
+      }
       if (!isAnnotatedSource(p)) {
         throw new LintUsageError(
           `${p} is not an annotated source file (${ANNOTATED_EXTENSIONS.join(", ")})`,
         );
-      }
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(p);
-      } catch {
-        continue; // unreadable named files are the BINARY's read findings, not ours
-      }
-      if (stat.isDirectory()) {
-        throw new LintUsageError(`${p} is a directory; name files or run without paths`);
       }
     }
     return { files: [...paths], mode: "explicit", base: null, note: null, stats: null, skipped: 0 };
