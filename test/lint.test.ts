@@ -1093,6 +1093,84 @@ test("the fence matches whole segments and never the basename: src/dist_helpers/
   assert.equal(selection.skipped, 0);
 });
 
+// ---------------------------------------------------------------------------
+// SPGD-1336: the fence's two HIDDEN members (`.git`, `.test-build`). The three
+// visible members are densely driven — deleting `dist` alone reddens seven
+// examples — while deleting BOTH hidden members from `SKIPPED_DIRECTORIES`
+// left the entire suite green at either application site. The Ruby twin's
+// spec reasons about "its TypeScript twin" when it pins the pair, which reads
+// as though both sides were covered; they were not, and the divergence is
+// real rather than cosmetic: Ruby walks with `Dir.glob` WITHOUT
+// `File::FNM_DOTMATCH`, so hidden directories are structurally unreachable
+// there, while `fs.readdirSync(dir, { withFileTypes: true })` DOES return
+// hidden entries — here the fence is the only thing keeping a build artifact
+// out of the selection. Driven against the real selector, removing the pair
+// selects `.test-build/generated/out.js` and lints it, which is the
+// false-exit-1-over-code-the-user-cannot-edit defect this fence family exists
+// to remove (SPGD-1254/1255/1273). Both directory names are spelled as
+// LITERALS below: a pin deriving its expectation from `SKIPPED_DIRECTORIES`
+// mutates with the constant and can never fail — the self-validating-pin trap
+// the Ruby spec's own comment warns about verbatim.
+// ---------------------------------------------------------------------------
+
+test("the walk fences the HIDDEN members .git and .test-build, which readdirSync does return", () => {
+  // `withFileTypes` enumeration is dot-inclusive, so each of these annotated
+  // files is genuinely offered to the walk and genuinely removed by the
+  // fence — unlike the Ruby twin, where the glob never sees them at all.
+  const f = makeRepo({
+    "src/a.ts": GOOD_ANNOTATION,
+    ".git/hooks/prepare-commit-msg.js": BAD_ANNOTATION,
+    ".test-build/test/lint.test.js": BAD_ANNOTATION,
+    ".test-build/generated/out.js": BAD_ANNOTATION,
+    "node_modules/pkg/index.js": BAD_ANNOTATION,
+  });
+  // Precondition: the hidden directories are reachable at the walk's own
+  // primitive. Without this the pin could pass on a dot-blind enumeration,
+  // asserting nothing about the fence.
+  const topLevelEntries = fs
+    .readdirSync(f.root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  assert.deepEqual(topLevelEntries, [".git", ".test-build", "node_modules", "src"]);
+
+  const selection = selectFiles([], f.root);
+  assert.equal(selection.mode, "walk");
+  assert.deepEqual(
+    selection.files.map((p) => path.relative(f.root, p)).sort(),
+    ["src/a.ts"],
+  );
+});
+
+test("the changed leg fences a COMMITTED file under the hidden .test-build directory, and counts the removal", () => {
+  // `.git` cannot travel this leg — git does not track its own directory —
+  // so `.test-build` is the hidden member the counted `--changed` arm can
+  // carry, and it is carried on the DIFF leg (committed, so
+  // `--exclude-standard` never touches it).
+  const f = initRepo({ "src/a.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "src/a.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.mkdirSync(path.join(f.root, ".test-build/generated"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, ".test-build/generated/out.js"), BAD_ANNOTATION);
+  // `-f`: a repository that ignores its own compiled test output would keep
+  // the file off both legs, and the pin would assert nothing.
+  git(f.root, "add", "-A", "-f");
+  git(f.root, "commit", "-m", "commit compiled test output carrying a malformed annotation");
+  // Precondition: the path is tracked, so it really does arrive via the diff.
+  assert.match(git(f.root, "ls-files"), /\.test-build\/generated\/out\.js/);
+
+  const selection = selectFiles([], f.root, { changed: true });
+  assert.deepEqual(selection.files, ["src/a.ts"]);
+  // Counted, not merely absent: the hidden member travels the same counted
+  // fence arm the visible members do.
+  assert.equal(selection.skipped, 1);
+  assert.deepEqual(
+    selection.stats,
+    { changed: 2, matches: 2, outsideRoot: 0, unreadable: 0, untracked: 0 },
+  );
+});
+
 test("a zero-fence changed selection is unchanged, and the skipped count defaults to 0 at every construction site", () => {
   // Mixed-shape changed run with nothing fenced: both legs contribute, the
   // count reads 0.
