@@ -278,7 +278,12 @@ test("--list: an empty file is a loud 0, and the warning names what was held bac
     try {
       const r2 = await runCli(["--list", "--lines", "9", held]);
       assert.equal(r2.code, 0);
-      assert.match(r2.stderr, /holds no runs to list \(2 lines not selected by --lines\)/);
+      // SPGD-1358: the warning names the absent number too — a wholly-unmatched
+      // selector is a typo to fix, and the warning now says which number.
+      assert.match(
+        r2.stderr,
+        /holds no runs to list \(2 lines not selected by --lines; --lines named 9, which the file does not have\)/,
+      );
     } finally {
       rm(held);
     }
@@ -530,6 +535,313 @@ test("a selector past the end of the file selects nothing: exit 0, stderr warnin
     assert.equal(srv.bodies.length, 0, "nothing is sent when the selector names nothing");
     assert.match(r.stderr, /holds no runs to deliver \(2 earlier lines skipped by --from-line\)/);
     assert.equal(r.stdout, "");
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+// --- SPGD-1358: naming the --lines numbers the file does not have -----------
+//
+// A `--lines` entry naming a line past the end of the file used to match
+// nothing, be held back by nothing and be carried by no counter — `skipped`
+// counts FILE lines — so `--lines 3,99` was byte-identical to `--lines 3` on
+// every channel. The port of SPGD-1328's design ends that silence: the clause
+// names the typed numbers in the shorthand they were typed in, and the
+// document carries them as `summary.absent` (`null` when satisfied, never
+// `[]`).
+
+test("SPGD-1358: delivering --lines 3,99 on a 5-line file differs from --lines 3 in exactly the added clause", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+    const file = tmpFile("q.jsonl", contents);
+    const satisfied = await runCli(["--lines", "3", file], srv.url);
+    const phantom = await runCli(["--lines", "3,99", file], srv.url);
+    assert.equal(satisfied.code, 0);
+    assert.equal(phantom.code, 0, "a short selection is not a verdict — exit 0 unchanged");
+    assert.notEqual(satisfied.stdout, phantom.stdout);
+    assert.ok(!satisfied.stdout.includes("the file does not have"));
+    assert.match(phantom.stdout, /--lines named 99, which the file does not have/);
+    // "Exactly the added clause", measured rather than inferred: stripping the
+    // clause and its separator restores the satisfied run byte for byte.
+    assert.equal(
+      phantom.stdout.replace("; --lines named 99, which the file does not have", ""),
+      satisfied.stdout,
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1358: listing --lines 3,99 on a 5-line file differs from --lines 3 in exactly the added clause", async () => {
+  const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    // --list is the documented route to the numbers, so a preview that
+    // under-reported would hand the user a set they did not send.
+    const satisfied = await runCli(["--list", "--lines", "3", file]);
+    const phantom = await runCli(["--list", "--lines", "3,99", file]);
+    assert.equal(satisfied.code, 0);
+    assert.equal(phantom.code, 0);
+    assert.equal(satisfied.stderr, "");
+    assert.equal(phantom.stderr, "");
+    assert.notEqual(satisfied.stdout, phantom.stdout);
+    assert.ok(!satisfied.stdout.includes("the file does not have"));
+    assert.match(phantom.stdout, /--lines named 99, which the file does not have/);
+    assert.equal(
+      phantom.stdout.replace("--lines named 99, which the file does not have; ", ""),
+      satisfied.stdout,
+    );
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: --json distinguishes a satisfied selector from one naming absent lines, on both paths", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+    const file = tmpFile("q.jsonl", contents);
+
+    const satisfied = await runCli(["--json", "--lines", "3", file], srv.url);
+    const doc = parseDocument(satisfied.stdout);
+    // Key order is the Ruby twin's: `absent` sits between `skipped` and
+    // `selector` — the two documents are key-for-key identical.
+    assert.deepEqual(Object.keys(doc.summary as Record<string, unknown>), [
+      "lines",
+      "attempted",
+      "accepted",
+      "refused",
+      "undelivered",
+      "unparseable",
+      "blank",
+      "skipped",
+      "absent",
+      "selector",
+    ]);
+    assert.deepEqual(doc.summary, {
+      lines: 1,
+      attempted: 1,
+      accepted: 1,
+      refused: 0,
+      undelivered: 0,
+      unparseable: 0,
+      blank: 0,
+      skipped: 4,
+      absent: null,
+      selector: "--lines",
+    });
+
+    const phantom = await runCli(["--json", "--lines", "3,99", file], srv.url);
+    const phantomDoc = parseDocument(phantom.stdout);
+    assert.deepEqual((phantomDoc.summary as Record<string, unknown>).absent, ["99"]);
+    assert.equal((phantomDoc.summary as Record<string, unknown>).skipped, 4);
+
+    // The listing document — the preview a bridge reads before sending.
+    const listedSat = await runCli(["--list", "--json", "--lines", "3", file]);
+    const listedPhantom = await runCli(["--list", "--json", "--lines", "3,99", file]);
+    const satSummary = parseDocument(listedSat.stdout).summary as Record<string, unknown>;
+    const phSummary = parseDocument(listedPhantom.stdout).summary as Record<string, unknown>;
+    assert.equal(satSummary.absent, null);
+    assert.deepEqual(phSummary.absent, ["99"]);
+    // Absent is the one key the two documents differ in — compared with the
+    // key itself nulled on both sides, since `null` and `["99"]` are the very
+    // difference under test.
+    assert.deepEqual({ ...satSummary, absent: null }, { ...phSummary, absent: null });
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1358: a range only half answered names its portion past the end, in the shorthand typed", async () => {
+  const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    const plain = await runCli(["--list", "--lines", "4-9", file]);
+    assert.equal(plain.code, 0);
+    assert.match(plain.stdout, /--lines named 6-9, which the file does not have/);
+    assert.ok(!plain.stdout.includes("4-9, which"), "the satisfied half is not re-named as absent");
+
+    const json = await runCli(["--list", "--json", "--lines", "4-9", file]);
+    const doc = parseDocument(json.stdout);
+    assert.deepEqual((doc.summary as Record<string, unknown>).absent, ["6-9"], "never expanded");
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: the document and the text summary name the same absent lines for one file and one spec", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    // Two renderers of ONE reading of the file, so they cannot disagree about
+    // which typed lines were absent — asserted as the two actually agreeing,
+    // not as two expectations that happen to match.
+    const contents = [1, 2, 3].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+    const file = tmpFile("q.jsonl", contents);
+    const json = await runCli(["--json", "--lines", "2-6,99", file], srv.url);
+    const plain = await runCli(["--lines", "2-6,99", file], srv.url);
+    const doc = parseDocument(json.stdout);
+    assert.deepEqual((doc.summary as Record<string, unknown>).absent, ["4-6", "99"]);
+    assert.match(plain.stdout, /--lines named 4-6, 99, which the file does not have/);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1358: --from-line keeps its held-back wording and gains no absent clause, past-EOF included", async () => {
+  const contents = [1, 2].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    // Past the end of the file: the suffix already says so through the lines
+    // it held back — widening the clause here would restate one fact as two.
+    const past = await runCli(["--list", "--from-line", "9", file]);
+    assert.equal(past.code, 0);
+    assert.match(past.stderr, /holds no runs to list \(2 earlier lines skipped by --from-line\)\n$/);
+    assert.ok(!past.stderr.includes("the file does not have"));
+
+    // In range: no clause either.
+    const inside = await runCli(["--list", "--from-line", "2", file]);
+    assert.equal(inside.code, 0);
+    assert.match(inside.stdout, /1 earlier line skipped by --from-line/);
+    assert.ok(!inside.stdout.includes("the file does not have"));
+
+    // The document agrees: `absent` is null under --from-line at every value.
+    const pastJson = await runCli(["--list", "--json", "--from-line", "9", file]);
+    const doc = parseDocument(pastJson.stdout);
+    assert.equal((doc.summary as Record<string, unknown>).absent, null);
+    assert.equal((doc.summary as Record<string, unknown>).selector, "--from-line");
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: a named line that exists and is blank reports as blank only, never also as absent", async () => {
+  const file = tmpFile("gappy.jsonl", `${runLine("1")}\n\n${runLine("3")}\n`);
+  try {
+    const r = await runCli(["--list", "--lines", "2", file]);
+    assert.equal(r.code, 0);
+    // Lines 1 and 3 were held back by --lines and the named line 2 was blank:
+    // each cause stated, and no absent clause — the blank owns its line.
+    assert.match(r.stderr, /holds no runs to list \(1 blank line skipped; 2 lines not selected by --lines\)\n$/);
+    assert.ok(!r.stderr.includes("the file does not have"));
+
+    const json = await runCli(["--list", "--json", "--lines", "2", file]);
+    const doc = parseDocument(json.stdout);
+    const summary = doc.summary as Record<string, unknown>;
+    assert.equal(summary.blank, 1);
+    assert.equal(summary.absent, null, "never [] and never a second cause for the blank");
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: blank, held-back and absent are stated together, each cause exactly once", async () => {
+  const file = tmpFile("gappy.jsonl", `${runLine("1")}\n\n${runLine("3")}\n`);
+  try {
+    const r = await runCli(["--list", "--lines", "1-2,9", file]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /1 blank line skipped/);
+    assert.match(r.stdout, /1 line not selected by --lines/);
+    assert.match(r.stdout, /--lines named 9, which the file does not have/);
+    // Additive, not redundant: every cause stated once, none dropped in favour
+    // of another.
+    assert.equal(r.stdout.split("the file does not have").length - 1, 1);
+    assert.equal(r.stdout.split("blank line").length - 1, 1);
+
+    const json = await runCli(["--list", "--json", "--lines", "1-2,9", file]);
+    const doc = parseDocument(json.stdout);
+    assert.deepEqual(doc.summary, {
+      lines: 1,
+      attempted: 0,
+      accepted: 0,
+      refused: 0,
+      undelivered: 0,
+      unparseable: 0,
+      blank: 1,
+      skipped: 1,
+      absent: ["9"],
+      selector: "--lines",
+    });
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: a wholly-unmatched selector's warning states its own cause, distinct from the empty-file warning", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n${runLine("2")}\n`);
+  const empty = tmpFile("e.jsonl", "");
+  try {
+    // A typo'd range and a genuinely empty file are different mistakes, and
+    // only one of them is the user's — the absent clause is what tells them
+    // apart. Exit stays 0 on both: a short selection is not a verdict.
+    const typo = await runCli(["--list", "--lines", "40-50", file]);
+    assert.equal(typo.code, 0);
+    assert.equal(typo.stdout, "");
+    assert.match(
+      typo.stderr,
+      /holds no runs to list \(2 lines not selected by --lines; --lines named 40-50, which the file does not have\)/,
+    );
+
+    const emptyRun = await runCli(["--list", empty]);
+    assert.equal(emptyRun.code, 0);
+    assert.equal(emptyRun.stderr, `specguard-ingest: warning: ${empty} holds no runs to list\n`);
+    assert.notEqual(typo.stderr, emptyRun.stderr);
+  } finally {
+    rm(file);
+    rm(empty);
+  }
+});
+
+test("SPGD-1358: a repeated absent number is named once", async () => {
+  // Four lines so something is listed — a wholly-empty listing prints no text
+  // summary, and the dedupe has to be visible on the text channel too.
+  const contents = [1, 2, 3, 4].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+  const file = tmpFile("q.jsonl", contents);
+  try {
+    const r = await runCli(["--list", "--lines", "3,5,5,7-9", file]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /--lines named 5, 7-9, which the file does not have/);
+    assert.equal(r.stdout.split("the file does not have").length - 1, 1);
+
+    const json = await runCli(["--list", "--json", "--lines", "3,5,5,7-9", file]);
+    const doc = parseDocument(json.stdout);
+    assert.deepEqual((doc.summary as Record<string, unknown>).absent, ["5", "7-9"]);
+    rm(file);
+  } finally {
+    rm(file);
+  }
+});
+
+test("SPGD-1358: delivery mode — the delivered set is unchanged by the absent naming (distinct-identity sink)", async () => {
+  // The outcome check an endpoint-free battery cannot produce: every line a
+  // distinct identity, so the received-body log names the selection directly.
+  // The mutation must be reporting-only — the same bodies arrive with
+  // `--lines 3,99` as with `--lines 3`.
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
+    const file = tmpFile("q.jsonl", contents);
+    const satisfied = await runCli(["--lines", "3", file], srv.url);
+    const satisfiedBodies = srv.bodies.slice();
+    assert.deepEqual(
+      satisfiedBodies.map((b) => /run-(\d)/.exec(b)?.[1]),
+      ["3"],
+    );
+    srv.bodies.length = 0;
+
+    const phantom = await runCli(["--lines", "3,99", file], srv.url);
+    assert.equal(phantom.code, 0);
+    assert.deepEqual(srv.bodies, satisfiedBodies, "identical bodies, phantom entry or not");
+    assert.match(phantom.stdout, /--lines named 99, which the file does not have/);
     rm(file);
   } finally {
     await srv.close();
@@ -1040,6 +1352,7 @@ test("SPGD-1226: the --json document carries the published shape over a mixed fi
       unparseable: 1,
       blank: 0,
       skipped: 0,
+      absent: null,
       selector: null,
     });
     const lines = doc.lines as Record<string, unknown>[];
@@ -1107,6 +1420,7 @@ test("SPGD-1226: foldings render as data — the same observation the text repor
       unparseable: 0,
       blank: 0,
       skipped: 0,
+      absent: null,
       selector: null,
     });
     rm(file);
@@ -1185,6 +1499,7 @@ test("SPGD-1226: --list --json lists the envelope facts as values and delivers n
       unparseable: 1,
       blank: 0,
       skipped: 0,
+      absent: null,
       selector: null,
     });
     const lines = doc.lines as Record<string, unknown>[];
@@ -1241,6 +1556,7 @@ test("SPGD-1226: an empty file emits a document under --json — the file was re
       unparseable: 0,
       blank: 0,
       skipped: 0,
+      absent: null,
       selector: null,
     });
 

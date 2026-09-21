@@ -146,6 +146,15 @@ function document(
  * `blank` and `skipped` are the two ways a line of <file> is not a row here.
  * They are stated always: a summary that quietly narrows what it is
  * summarising is the failure this command is arranged against.
+ *
+ * `absent` is that same rule pointed the other way — at the numbers that were
+ * typed rather than at the lines that were read. A `--lines` entry naming past
+ * the end of the file is held back by nothing and read as nothing, so
+ * `skipped` (which counts lines of <file>) structurally cannot carry it, and
+ * without this key a satisfied selector and a phantom one render the identical
+ * document. It is `null` rather than `[]` where the selector was fully
+ * satisfied, on `selector`'s terms: a fact that does not apply is absent,
+ * never a fabricated empty.
  */
 function summary(
   source: Source,
@@ -162,8 +171,23 @@ function summary(
     unparseable: counts.unparseable,
     blank: source.blank,
     skipped: source.skipped,
+    absent: absent(source),
     selector: selector(source),
   };
+}
+
+/**
+ * The typed line numbers the file does not have, in the shorthand they were
+ * typed in and computed by `readSource` once for both renderers — the
+ * discipline the counts above are held to, applied to the one fact the text
+ * summary and this document could otherwise disagree about.
+ *
+ * `null` rather than `[]` where the selector was fully satisfied, on
+ * {@link selector}'s terms: a fact that does not apply is absent, never a
+ * fabricated empty.
+ */
+function absent(source: Source): string[] | null {
+  return source.absent.length === 0 ? null : source.absent;
 }
 
 /** Every line that reached the endpoint, which is every line except the ones that were never a run. */
