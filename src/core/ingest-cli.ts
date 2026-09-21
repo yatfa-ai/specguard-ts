@@ -135,13 +135,29 @@ export interface Options {
   version: boolean;
 }
 
-/** The file, as this tool reads it: payloads held, blanks counted, held-backs counted and named. */
+/**
+ * The file, as this tool reads it: payloads held, blanks counted, held-backs counted and named.
+ *
+ * `absent` is the same discipline applied one layer later, to the lines that
+ * were *typed* rather than to the lines that were read. A `--lines` entry can
+ * name a line past the end of the file, and such a number is not held back —
+ * there was nothing there to hold — so `skipped` cannot carry it and the
+ * file's own counts cannot state it. It is derived from the file's length in
+ * {@link readSource} and rendered in the shorthand it was typed in, because
+ * the user acts on what they typed. Empty when the selector was fully
+ * satisfied, and empty under `--from-line`, whose past-the-end case is already
+ * a suffix that selected nothing. Computed once here and rendered by BOTH
+ * renderers — two renderers of one reading that can disagree are worse than
+ * prose alone.
+ */
 export interface Source {
   path: string;
   /** `text` is null for a line that is not valid UTF-8 — a verdict/row, never a delivery. */
   lines: { number: number; text: string | null }[];
   blank: number;
   skipped: number;
+  /** The `--lines` numbers the file does not have, each a number or an `N-M` range, in the shorthand typed. */
+  absent: string[];
   selector: "from-line" | "lines";
 }
 
@@ -273,6 +289,10 @@ async function readSource(options: Options): Promise<Source> {
     lines,
     blank,
     skipped,
+    // `number` is the file's line count after the loop — 0 for an empty file,
+    // counted rather than inferred — which is what `absentEntries` measures
+    // the typed numbers against.
+    absent: absentEntries(options, number),
     selector: options.lineSet !== null ? "lines" : "from-line",
   };
 }
@@ -283,6 +303,35 @@ function heldBack(number: number, options: Options): boolean {
     return !options.lineSet.some((r) => number >= r.first && number <= r.last);
   }
   return number < options.fromLine;
+}
+
+/**
+ * The typed numbers the file does not have, in the shorthand they were typed
+ * in. Computed ONLY under `--lines`: a `--from-line` past the end of the file
+ * is a suffix that selected nothing and already says so through the lines it
+ * held back, so widening this to cover it would restate one fact as two.
+ *
+ * A line the file HAS and that is blank is never here — `blank` already says
+ * "you named a line that exists and holds nothing", and stating both would be
+ * one line reported under two causes. The comparison is against the file's
+ * length alone, which is what keeps that true rather than merely usually
+ * true.
+ *
+ * The clamp is per range, so a range that is only half answered names its
+ * portion past the end (`4-9` over a 5-line file → `6-9`) rather than the
+ * whole entry, because the satisfied half was honoured. Rendered in the
+ * shorthand the user typed — never expanded — and deduplicated, so a repeated
+ * absent number is named once.
+ */
+function absentEntries(options: Options, length: number): string[] {
+  if (options.lineSet === null) return [];
+  const entries: string[] = [];
+  for (const r of options.lineSet) {
+    const first = Math.max(r.first, length + 1);
+    if (first > r.last) continue;
+    entries.push(first === r.last ? String(first) : `${first}-${r.last}`);
+  }
+  return [...new Set(entries)];
 }
 
 function parseOptions(argv: string[]): Options | null {
@@ -653,11 +702,24 @@ function blankClause(source: Source): string {
   return plural(source.blank, "blank line") + " skipped";
 }
 
+/**
+ * The typed numbers the file does not have, named rather than counted —
+ * {@link skippedClause}'s counterpart for the other direction: that one says
+ * how much of the FILE the selector held back, and this one says how much of
+ * the SELECTOR the file could not answer. A count would be the wrong shape
+ * here — the reader's next action is editing the numbers they typed, so the
+ * clause hands those numbers back in the form they wrote them.
+ */
+function absentClause(source: Source): string {
+  return `--lines named ${source.absent.join(", ")}, which the file does not have`;
+}
+
 /** Why there was nothing to do, when there is a reason other than "the file is empty". */
 function emptyDetail(source: Source): string {
   const parts: string[] = [];
   if (source.blank > 0) parts.push(blankClause(source));
   if (source.skipped > 0) parts.push(skippedClause(source));
+  if (source.absent.length > 0) parts.push(absentClause(source));
   return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
@@ -726,6 +788,7 @@ function summaryLine(source: Source, results: LineResult[], counts: StatusCounts
   if (counts.unparseable > 0) parts.push(`${counts.unparseable} could not be parsed`);
   if (source.blank > 0) parts.push(blankClause(source));
   if (source.skipped > 0) parts.push(skippedClause(source));
+  if (source.absent.length > 0) parts.push(absentClause(source));
   return parts.join("; ");
 }
 
@@ -762,6 +825,7 @@ async function list(options: Options, stdout: IngestStream, stderr: IngestStream
   ];
   if (source.blank > 0) parts.push(blankClause(source));
   if (source.skipped > 0) parts.push(skippedClause(source));
+  if (source.absent.length > 0) parts.push(absentClause(source));
   parts.push("nothing was delivered");
   stdout.write(`${parts.join("; ")}\n`);
   return EXIT_OK;
