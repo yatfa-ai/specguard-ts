@@ -1093,6 +1093,32 @@ test("the fence matches whole segments and never the basename: src/dist_helpers/
   assert.equal(selection.skipped, 0);
 });
 
+test("the walk fences the directory ENTRY by exact name only: src/dist_helpers/ is walked and src/coverage.ts is selected", () => {
+  const f = makeRepo({
+    "src/a.ts": GOOD_ANNOTATION,
+    "src/dist_helpers/a.ts": GOOD_ANNOTATION,
+    "src/coverage.ts": GOOD_ANNOTATION,
+  });
+
+  // Walk mode IS the point: the pin above drives the same three files
+  // through `--changed`, where `skippedDirectory()` decides at path level,
+  // while the bare invocation decides here at the recursion's directory
+  // entry (`!SKIPPED_DIRECTORIES.has(entry.name)`). That entry check is the
+  // one shape the pin above cannot see: a substring or basename-inclusive
+  // match creeping into it would prune BOTH of these files from the walk —
+  // `dist_helpers` contains "dist", and so does the basename `coverage.ts`
+  // contain "coverage" — while `--changed` on the same tree still selects
+  // them.
+  const selection = selectFiles([], f.root);
+  assert.equal(selection.mode, "walk");
+  // Literal paths, never derived from SKIPPED_DIRECTORIES: a pin reading its
+  // expectation off the constant mutates with it and can never fail.
+  assert.deepEqual(
+    selection.files.map((p) => path.relative(f.root, p)).sort(),
+    ["src/a.ts", "src/coverage.ts", "src/dist_helpers/a.ts"],
+  );
+});
+
 // ---------------------------------------------------------------------------
 // SPGD-1336: the fence's two HIDDEN members (`.git`, `.test-build`). The three
 // visible members are densely driven — deleting `dist` alone reddens seven
