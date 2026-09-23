@@ -282,6 +282,138 @@ test("a fallback write that itself fails only warns — never throws", async () 
   assert.match(s.warnings[1] ?? "", /could not write telemetry/);
 });
 
+// --- SPGD-1418: the double-failure arm must speak ----------------------------
+//
+// The test above drives this very arm and stayed green through the defect:
+// every clause it pins (`SpecGuard:`, the warning count, `could not write
+// telemetry`) is true on both the broken and the fixed code, because the
+// defect was not a missing line — it was a LYING line ("The test run is
+// unaffected.", printed twice) plus a false promise ("Falling back to <path>")
+// and a false outcome ("fell-back") for a run that went nowhere. The pins
+// below therefore assert on bytes that DIFFER: the absence of "unaffected"
+// anywhere in the output, and the presence of the loss statement and the
+// queue path. They exist on both transport arms because the fix restructured
+// both call sites; reverting either one alone must fail its own pin.
+
+test("SPGD-1418: a refused delivery whose replay write also fails names the loss — the output never claims the run is unaffected", async () => {
+  const srv = await startServer((req, res) => {
+    res.statusCode = 401;
+    res.end("unauthorized");
+  });
+  try {
+    const s = sink();
+    const result = await deliver(envelope(), env({ endpoint: srv.url }), {
+      warn: s.warn,
+      appendFileImpl: async () => {
+        throw new Error("EEXIST: file already exists, mkdir '/tmp/p2/blocker'");
+      },
+    });
+    // The outcome must not report a fall-back that did not happen.
+    assert.equal(result.delivered, false);
+    assert.equal(result.outcome, "lost");
+    // THE LOAD-BEARING ASSERTIONS — both false on the unfixed code:
+    assert.ok(
+      !s.warnings.join("\n").includes("unaffected"),
+      `the double-failure output must not claim the run is unaffected:\n${s.warnings.join("\n")}`,
+    );
+    assert.match(s.warnings.join("\n"), /telemetry was lost/);
+    // The queue path that was NOT written is named, and the actionable status
+    // clause survives.
+    assert.match(s.warnings.join("\n"), /specguard-ts-test-replay-queue\.jsonl/);
+    assert.match(s.warnings.join("\n"), /HTTP 401/);
+    // Shape (descriptive, not load-bearing — true before and after): the
+    // status clause alone, then the loss line.
+    assert.equal(s.warnings.length, 2);
+    assert.match(s.warnings[0] ?? "", /HTTP 401/);
+    assert.doesNotMatch(s.warnings[0] ?? "", /Falling back/);
+    assert.match(s.warnings[1] ?? "", /telemetry was lost/);
+    // And nothing was written anywhere.
+    assert.equal(s.writes.length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1418: the same loss on the network arm — an unreachable endpoint and an unwritable queue never claim the run is unaffected", async () => {
+  const s = sink();
+  const result = await deliver(envelope(), env(), {
+    warn: s.warn,
+    appendFileImpl: async () => {
+      throw new Error("EEXIST: file already exists, mkdir '/tmp/p2/blocker'");
+    },
+  });
+  assert.equal(result.delivered, false);
+  assert.equal(result.outcome, "lost");
+  assert.ok(
+    !s.warnings.join("\n").includes("unaffected"),
+    `the double-failure output must not claim the run is unaffected:\n${s.warnings.join("\n")}`,
+  );
+  assert.match(s.warnings.join("\n"), /telemetry was lost/);
+  assert.match(s.warnings.join("\n"), /specguard-ts-test-replay-queue\.jsonl/);
+  assert.match(s.warnings.join("\n"), /could not deliver test telemetry/);
+  assert.equal(s.writes.length, 0);
+});
+
+test("SPGD-1418: append rejecting with null itself still names the loss — the write-failure discriminator is presence, not a sentinel value", async () => {
+  // TransportDeps.appendFileImpl is public injectable API and its rejection
+  // value is outside this package's control. A `throw null` is the exact
+  // input that impersonated "no error" under a `writeError: unknown = null`
+  // sentinel: the loss line was skipped, the promise line printed, and the
+  // outcome read "fell-back" for a write that never happened. Presence must
+  // be carried separately from the value.
+  const s = sink();
+  const result = await deliver(envelope(), env(), {
+    warn: s.warn,
+    appendFileImpl: async () => {
+      throw null;
+    },
+  });
+  assert.equal(result.delivered, false);
+  // A null rejection IS a failed write: the outcome must not claim a
+  // fall-back that did not happen.
+  assert.equal(result.outcome, "lost");
+  assert.ok(
+    !s.warnings.join("\n").includes("unaffected"),
+    `a null rejection must not resurrect the promise line:\n${s.warnings.join("\n")}`,
+  );
+  assert.match(s.warnings.join("\n"), /telemetry was lost/);
+  // The write's rejection renders as its own value, so the operator sees
+  // WHAT rejected, not only that something did.
+  assert.match(s.warnings.join("\n"), /could not write telemetry to .* \(null\), so this run's telemetry was lost\./);
+  assert.match(s.warnings.join("\n"), /specguard-ts-test-replay-queue\.jsonl/);
+  assert.equal(s.writes.length, 0);
+});
+
+test("SPGD-1418: the successful fall-back sentence is single-sourced — pinned byte for byte at that one site", async () => {
+  // Before the fallBackToQueue extraction this sentence was composed at two
+  // call sites; now fallBackToQueue is the single point of failure for its
+  // exact bytes, so the composition carries its own guard. The successful
+  // path's sentence — the one line whose bytes AC3 froze against
+  // origin/main — must never drift silently.
+  const srv = await startServer((req, res) => {
+    res.statusCode = 401;
+    res.end("unauthorized");
+  });
+  try {
+    const base = env({ endpoint: srv.url });
+    const s = sink();
+    const result = await deliver(envelope(), base, {
+      warn: s.warn,
+      appendFileImpl: s.appendFile,
+    });
+    assert.equal(result.delivered, false);
+    assert.equal(result.outcome, "fell-back");
+    assert.equal(s.warnings.length, 1);
+    assert.equal(
+      s.warnings[0],
+      `SpecGuard: could not deliver test telemetry (HTTP 401 — unauthorized). Falling back to ${base.outputPath}; the test run is unaffected.`,
+    );
+    assert.equal(s.writes.length, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
 // --- SPGD-1188: version() must resolve the REAL package version --------------
 //
 // Until SPGD-1195 the UA test above pinned only /^specguard-ts\//, which is

@@ -68,7 +68,7 @@ export SPECGUARD_TIMEOUT=10         # optional; seconds, applied to the whole de
 and a fork with no secret configured behaves like a laptop rather than like a broken build. Its name is
 configurable via `SPECGUARD_LOCAL_OUTPUT_PATH`.
 
-**A failed delivery is never silent, and never lost.** If the endpoint refuses the run (a `401` from a
+**A failed delivery is never silent.** If the endpoint refuses the run (a `401` from a
 rotated key, a `400`, a `500`) or cannot be reached at all, the reporter prints **one** line to stderr
 naming the status or the error, and appends the payload to `log/test_results.jsonl` — the **replay
 queue** — so the run can be replayed later with
@@ -77,6 +77,16 @@ queue** — so the run can be replayed later with
 ```
 SpecGuard: could not deliver test telemetry (HTTP 401 — the API key was not
 accepted). Falling back to log/test_results.jsonl; the test run is unaffected.
+```
+
+If the replay queue cannot be written either, the reporter does not pretend otherwise: no fallback is
+promised and nothing is called "unaffected" — the status line stands alone, and a second line names
+the queue path and states the loss. That is a run whose telemetry was lost; `deliver` reports it as
+outcome `"lost"`:
+
+```
+SpecGuard: could not deliver test telemetry (HTTP 401 — the API key was not accepted).
+SpecGuard: could not write telemetry to log/test_results.jsonl (EEXIST: file already exists, mkdir 'log'), so this run's telemetry was lost.
 ```
 
 There are **no retries**, and the whole delivery is bounded by the timeout (10 seconds by default):

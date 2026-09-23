@@ -20,8 +20,15 @@ export interface TransportDeps {
 
 export interface DeliveryResult {
   delivered: boolean;
-  /** "sent" | "fell-back" | "skipped" | "no-commit" */
-  outcome: "sent" | "fell-back" | "skipped" | "no-commit";
+  /**
+   * "sent" | "fell-back" | "lost" | "skipped" | "no-commit"
+   *
+   * "lost" — the endpoint refused the run AND the replay queue could not be
+   * written either: the run's telemetry is gone. It is distinct from
+   * "fell-back", which now means exactly one thing — the queue write
+   * succeeded.
+   */
+  outcome: "sent" | "fell-back" | "lost" | "skipped" | "no-commit";
 }
 
 function defaultWarn(message: string): void {
@@ -133,11 +140,13 @@ export async function deliver(
       } catch {
         detail = "";
       }
-      warn(
-        `SpecGuard: could not deliver test telemetry (HTTP ${res.status}${detail === "" ? "" : ` — ${detail}`}). Falling back to ${env.outputPath}; the test run is unaffected.`,
+      return fallBackToQueue(
+        `SpecGuard: could not deliver test telemetry (HTTP ${res.status}${detail === "" ? "" : ` — ${detail}`})`,
+        append,
+        warn,
+        env,
+        json,
       );
-      await writeFallback(append, warn, env, json);
-      return { delivered: false, outcome: "fell-back" };
     }
 
     // Drain the body so the socket is released cleanly.
@@ -148,27 +157,70 @@ export async function deliver(
     }
     return { delivered: true, outcome: "sent" };
   } catch (err) {
-    warn(
-      `SpecGuard: could not deliver test telemetry (${errorMessage(err)}). Falling back to ${env.outputPath}; the test run is unaffected.`,
+    return fallBackToQueue(
+      `SpecGuard: could not deliver test telemetry (${errorMessage(err)})`,
+      append,
+      warn,
+      env,
+      json,
     );
-    await writeFallback(append, warn, env, json);
-    return { delivered: false, outcome: "fell-back" };
   }
 }
 
-async function writeFallback(
+/**
+ * The sink half of a refused delivery, composed from the write's OWN answer —
+ * report, not promise (the Ruby Transport's shape, SPGD-1413's
+ * `#append`/`#fall_back`). Before SPGD-1418 the refusal line promised
+ * `Falling back to <path>; the test run is unaffected.` BEFORE the write ran,
+ * so a queue that could not be written either printed that false promise and
+ * a second, equally false "unaffected" — and `deliver` returned
+ * `outcome: "fell-back"` for a run that went nowhere.
+ *
+ * The delivery status clause (`HTTP 401`, the fetch error) is settled by the
+ * caller and stays the first fact on the wire — the order of reasoning does
+ * not move; only the sink clause now waits for the write it describes:
+ *
+ *   - the queue write succeeded → the historical one-line shape, byte for
+ *     byte: `<status clause>. Falling back to <path>; the test run is
+ *     unaffected.` — outcome `"fell-back"`.
+ *   - the queue write failed too → the status clause alone (no promise), then
+ *     a second line that names the queue path and states the loss:
+ *     `SpecGuard: could not write telemetry to <path> (<error>), so this
+ *     run's telemetry was lost.` — outcome `"lost"`.
+ *
+ * Still never throws: the write's rejection is the return value's input, not
+ * an escape.
+ */
+async function fallBackToQueue(
+  statusClause: string,
   append: (path: string, data: string) => Promise<void>,
   warn: (message: string) => void,
   env: RunnerEnv,
   json: string,
-): Promise<void> {
+): Promise<DeliveryResult> {
+  // `append` is public injectable API (TransportDeps.appendFileImpl) and its
+  // rejection value is outside this package's control, so the failure is
+  // carried as presence — a wrapper object or null — never as a sentinel
+  // value. A `writeError: unknown = null` discriminator conflates "no error"
+  // with "the error WAS null": `append` rejecting with `null` would leave the
+  // sentinel standing, print the promise line for a write that never happened
+  // and return "fell-back" — the exact lie this function exists to remove.
+  // Do not simplify the wrapper away.
+  let writeFailure: { error: unknown } | null = null;
   try {
     await append(env.outputPath, `${json}\n`);
   } catch (err) {
-    warn(
-      `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(err)}). The test run is unaffected.`,
-    );
+    writeFailure = { error: err };
   }
+  if (writeFailure !== null) {
+    warn(`${statusClause}.`);
+    warn(
+      `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(writeFailure.error)}), so this run's telemetry was lost.`,
+    );
+    return { delivered: false, outcome: "lost" };
+  }
+  warn(`${statusClause}. Falling back to ${env.outputPath}; the test run is unaffected.`);
+  return { delivered: false, outcome: "fell-back" };
 }
 
 /**
