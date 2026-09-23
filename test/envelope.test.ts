@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildEnvelope } from "../src/core/envelope.js";
+import { readRunnerEnv } from "../src/core/env.js";
 import type { SpecRow } from "../src/core/types.js";
 
 function row(name: string): SpecRow {
@@ -67,6 +68,25 @@ test("buildEnvelope returns null without a commit sha — a payload without it w
     }, 1),
     null,
   );
+});
+
+test("a whitespace-only commit sha reaches buildEnvelope as null and is dropped, end to end", () => {
+  // Same rationale as the arm above, one character wider: the platform
+  // requires `value.strip.present?`, so a blank sha is refused 400 exactly
+  // as fully as an empty one — and the refused line is then re-posted
+  // byte-for-byte from the replay queue forever.
+  //
+  // The guard in `envelope.ts` is UNCHANGED and is not what fixes this: it
+  // still tests `=== ""`. What changed is upstream, in `firstEnv`, so the
+  // blank never reaches here as a value. This asserts the end-to-end
+  // property through the real resolver rather than hand-feeding "   " to
+  // `buildEnvelope`, which would pin a guard this ticket deliberately did
+  // not touch.
+  const env = readRunnerEnv({
+    env: { SPECGUARD_COMMIT_SHA: "   ", PATH: "/nonexistent" } as NodeJS.ProcessEnv,
+  });
+  assert.equal(env.commitSha, null, "the blank must resolve to null, not to whitespace");
+  assert.equal(buildEnvelope([row("works")], env, 1), null);
 });
 
 test("negative or non-finite duration_seconds is nulled, never sent", () => {

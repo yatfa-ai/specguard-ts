@@ -21,13 +21,35 @@ export interface RunnerEnv {
   localOutputPath: string;
 }
 
+/**
+ * First env value that carries content, trimmed — the port of the Ruby
+ * client's `Configuration#first_present`, which does `env[key].to_s.strip`
+ * and skips the key when the result is empty.
+ *
+ * The trim is the whole point: a whitespace-only value is UNSET, not a
+ * value. Without it a blank `SPECGUARD_COMMIT_SHA` satisfied this predicate,
+ * SHADOWED a resolvable `git rev-parse HEAD`, passed `buildEnvelope`'s
+ * `=== ""` guard, and was refused 400 by the platform
+ * (`Ingest::Payload#validate_commit_sha` requires `value.strip.present?`) —
+ * landing a permanently undeliverable line in the replay queue, since
+ * `deliverRawLine` re-posts the saved bytes as-is. Fixed once here, for
+ * every key `readRunnerEnv` reads, rather than as a `commitSha` special
+ * case: Ruby strips all of its own.
+ *
+ * The trimmed value is what is RETURNED, too. That is not a separate
+ * decision: a padded-but-non-blank value keys the same run either way,
+ * because the platform normalizes it (`payload.rb` stores
+ * `@body["commit_sha"].strip`).
+ */
 function firstEnv(
   env: Record<string, string | undefined>,
   names: string[],
 ): string | null {
   for (const name of names) {
     const value = env[name];
-    if (typeof value === "string" && value !== "") return value;
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed !== "") return trimmed;
   }
   return null;
 }
