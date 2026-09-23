@@ -282,6 +282,78 @@ test("a fallback write that itself fails only warns — never throws", async () 
   assert.match(s.warnings[1] ?? "", /could not write telemetry/);
 });
 
+// --- SPGD-1418: the double-failure arm must speak ----------------------------
+//
+// The test above drives this very arm and stayed green through the defect:
+// every clause it pins (`SpecGuard:`, the warning count, `could not write
+// telemetry`) is true on both the broken and the fixed code, because the
+// defect was not a missing line — it was a LYING line ("The test run is
+// unaffected.", printed twice) plus a false promise ("Falling back to <path>")
+// and a false outcome ("fell-back") for a run that went nowhere. The pins
+// below therefore assert on bytes that DIFFER: the absence of "unaffected"
+// anywhere in the output, and the presence of the loss statement and the
+// queue path. They exist on both transport arms because the fix restructured
+// both call sites; reverting either one alone must fail its own pin.
+
+test("SPGD-1418: a refused delivery whose replay write also fails names the loss — the output never claims the run is unaffected", async () => {
+  const srv = await startServer((req, res) => {
+    res.statusCode = 401;
+    res.end("unauthorized");
+  });
+  try {
+    const s = sink();
+    const result = await deliver(envelope(), env({ endpoint: srv.url }), {
+      warn: s.warn,
+      appendFileImpl: async () => {
+        throw new Error("EEXIST: file already exists, mkdir '/tmp/p2/blocker'");
+      },
+    });
+    // The outcome must not report a fall-back that did not happen.
+    assert.equal(result.delivered, false);
+    assert.equal(result.outcome, "lost");
+    // THE LOAD-BEARING ASSERTIONS — both false on the unfixed code:
+    assert.ok(
+      !s.warnings.join("\n").includes("unaffected"),
+      `the double-failure output must not claim the run is unaffected:\n${s.warnings.join("\n")}`,
+    );
+    assert.match(s.warnings.join("\n"), /telemetry was lost/);
+    // The queue path that was NOT written is named, and the actionable status
+    // clause survives.
+    assert.match(s.warnings.join("\n"), /specguard-ts-test-replay-queue\.jsonl/);
+    assert.match(s.warnings.join("\n"), /HTTP 401/);
+    // Shape (descriptive, not load-bearing — true before and after): the
+    // status clause alone, then the loss line.
+    assert.equal(s.warnings.length, 2);
+    assert.match(s.warnings[0] ?? "", /HTTP 401/);
+    assert.doesNotMatch(s.warnings[0] ?? "", /Falling back/);
+    assert.match(s.warnings[1] ?? "", /telemetry was lost/);
+    // And nothing was written anywhere.
+    assert.equal(s.writes.length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1418: the same loss on the network arm — an unreachable endpoint and an unwritable queue never claim the run is unaffected", async () => {
+  const s = sink();
+  const result = await deliver(envelope(), env(), {
+    warn: s.warn,
+    appendFileImpl: async () => {
+      throw new Error("EEXIST: file already exists, mkdir '/tmp/p2/blocker'");
+    },
+  });
+  assert.equal(result.delivered, false);
+  assert.equal(result.outcome, "lost");
+  assert.ok(
+    !s.warnings.join("\n").includes("unaffected"),
+    `the double-failure output must not claim the run is unaffected:\n${s.warnings.join("\n")}`,
+  );
+  assert.match(s.warnings.join("\n"), /telemetry was lost/);
+  assert.match(s.warnings.join("\n"), /specguard-ts-test-replay-queue\.jsonl/);
+  assert.match(s.warnings.join("\n"), /could not deliver test telemetry/);
+  assert.equal(s.writes.length, 0);
+});
+
 // --- SPGD-1188: version() must resolve the REAL package version --------------
 //
 // Until SPGD-1195 the UA test above pinned only /^specguard-ts\//, which is
