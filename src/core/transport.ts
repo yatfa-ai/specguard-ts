@@ -198,16 +198,24 @@ async function fallBackToQueue(
   env: RunnerEnv,
   json: string,
 ): Promise<DeliveryResult> {
-  let writeError: unknown = null;
+  // `append` is public injectable API (TransportDeps.appendFileImpl) and its
+  // rejection value is outside this package's control, so the failure is
+  // carried as presence — a wrapper object or null — never as a sentinel
+  // value. A `writeError: unknown = null` discriminator conflates "no error"
+  // with "the error WAS null": `append` rejecting with `null` would leave the
+  // sentinel standing, print the promise line for a write that never happened
+  // and return "fell-back" — the exact lie this function exists to remove.
+  // Do not simplify the wrapper away.
+  let writeFailure: { error: unknown } | null = null;
   try {
     await append(env.outputPath, `${json}\n`);
   } catch (err) {
-    writeError = err;
+    writeFailure = { error: err };
   }
-  if (writeError !== null) {
+  if (writeFailure !== null) {
     warn(`${statusClause}.`);
     warn(
-      `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(writeError)}), so this run's telemetry was lost.`,
+      `SpecGuard: could not write telemetry to ${env.outputPath} (${errorMessage(writeFailure.error)}), so this run's telemetry was lost.`,
     );
     return { delivered: false, outcome: "lost" };
   }
