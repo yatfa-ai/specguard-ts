@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import type { Envelope } from "../src/core/types.js";
@@ -411,5 +411,217 @@ test("never-fail end to end: annotations present but NO binary ⇒ slice-1 rows,
     assert.match(result.stderr, /test run is unaffected/);
   } finally {
     await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-1411: the reporter binds its repo root ONCE, at run start.
+//
+// Every test above runs the README's documented `node --test` form, where the
+// tests execute in CHILD processes and the reporter runs in the parent — so a
+// test's `process.chdir` can never reach the reporter. This pair drives the
+// IN-PROCESS form (`node --test-reporter=… file.js`), which is the only
+// invocation whose cwd the reporter shares, and is therefore the only one
+// that can observe a mid-run move.
+//
+// The pair is an ARM PAIR and both arms are load-bearing: the no-chdir arm is
+// the POSITIVE CONTROL and must annotate. A pair where NEITHER arm annotates
+// measures nothing — it is satisfied by a rig that simply never annotates.
+//
+// Reproduced against pre-fix `dist/`: control annotated, chdir arm shipped
+// `status=unannotated intent=null` for the same row.
+
+/**
+ * A scratch repo root holding a two-file tree, so discovery's scope is
+ * genuinely root-dependent (root → 2 files; root/sub → 1), plus a stub
+ * validator answering for both fixtures.
+ *
+ * The annotated fixture is COPIED from the repo's own `fixtures/annotated.
+ * test.js` header shape (an `// @intent:` comment on the line directly above
+ * the `test(` call) rather than hand-written, and its annotation line is READ
+ * back from the file it writes — no restated magic numbers.
+ */
+function scratchRepo(): {
+  root: string;
+  validator: string;
+  plainFixture: string;
+  chdirFixture: string;
+  annotationLineOf: (fixture: string) => number;
+  cleanup: () => void;
+} {
+  const root = mkdtempSync(join(tmpdir(), "specguard-chdir-"));
+  mkdirSync(join(root, "sub"), { recursive: true });
+  // A second file below `sub/`, so the two candidate roots select different
+  // file sets and a wrong root is a genuinely wrong discovery scope.
+  writeFileSync(join(root, "sub", "other.test.js"), 'import { test } from "node:test";\ntest("elsewhere", () => {});\n');
+
+  const intentComment =
+    '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"applies the discount when the code is valid","layer":"unit"}';
+
+  // Two fixtures differing ONLY in whether the second test moves the cwd.
+  const body = (moves: boolean): string =>
+    [
+      'import { test } from "node:test";',
+      "",
+      intentComment,
+      'test("applies a valid promo code", async () => { await new Promise((r) => setTimeout(r, 20)); });',
+      "",
+      moves
+        ? 'test("second", async () => { await new Promise((r) => setTimeout(r, 20)); process.chdir("sub"); });'
+        : 'test("second", async () => { await new Promise((r) => setTimeout(r, 20)); });',
+      "",
+    ].join("\n");
+
+  writeFileSync(join(root, "plain.test.js"), body(false));
+  writeFileSync(join(root, "moves.test.js"), body(true));
+
+  const annotationLineOf = (fixture: string): number => {
+    const lines = readFileSync(join(root, fixture), "utf8").split("\n");
+    const i = lines.findIndex((l) => l.startsWith("// @intent:"));
+    if (i < 0) throw new Error(`fixture lost its annotation: ${fixture}`);
+    return i + 1;
+  };
+
+  // The REAL validator seam: a v0.1.4-shaped stub answering the probe flags
+  // with the contract digest and `--source --json` with passing findings for
+  // both fixtures, keyed at each annotation COMMENT's line.
+  const findings = ["plain.test.js", "moves.test.js"].map((file) => ({
+    file,
+    line: annotationLineOf(file),
+    kind: null,
+    ok: true,
+    errors: [],
+    intent: {
+      entity: "Cart",
+      action: "apply promo code",
+      behavior: "applies the discount when the code is valid",
+      layer: "unit",
+    },
+  }));
+  const doc = JSON.stringify({ mode: "source", findings, summary: { annotations: findings.length } });
+  const validator = join(root, "validate-intent");
+  writeFileSync(
+    validator,
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      `  --version) printf '%s\\n' 'validate-intent stub (intent) schema sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      `  --schema-source) printf '%s\\n' 'schema <embedded schema> sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      "esac",
+      'if [ "$1" = "--source" ]; then',
+      `  printf '%s\\n' '${doc.replace(/'/g, `'\\''`)}'`,
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+
+  return {
+    root,
+    validator,
+    plainFixture: "plain.test.js",
+    chdirFixture: "moves.test.js",
+    annotationLineOf,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+/**
+ * Run one fixture through the REAL built reporter under the IN-PROCESS form,
+ * with `root` as cwd, and return the shipped envelope read back from the
+ * local sink (no API key ⇒ local sink, no network).
+ */
+async function runInProcess(
+  repo: ReturnType<typeof scratchRepo>,
+  fixture: string,
+): Promise<{ envelope: Envelope; result: RunResult }> {
+  const sink = join(repo.root, `${fixture}.sink.jsonl`);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SPECGUARD_API_KEY: "",
+    SPECGUARD_COMMIT_SHA: "deadbeef",
+    SPECGUARD_LOCAL_OUTPUT_PATH: sink,
+    SPECGUARD_OUTPUT_PATH: join(repo.root, "queue.jsonl"),
+    SPECGUARD_VALIDATE_INTENT: repo.validator,
+  };
+  delete env.NODE_TEST_CONTEXT;
+
+  let result: RunResult;
+  try {
+    // NOTE: no `--test` flag — that is what keeps the fixture IN THIS
+    // process, where its chdir is observable by the reporter.
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [`--test-reporter=${reporterPath}`, join(repo.root, fixture)],
+      { cwd: repo.root, env },
+    );
+    result = { code: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { code?: number; stdout?: string; stderr?: string };
+    result = { code: e.code ?? -1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  }
+
+  const lines = readFileSync(sink, "utf8").trim().split("\n");
+  return { envelope: JSON.parse(lines[lines.length - 1]!) as Envelope, result };
+}
+
+test("in-process control: a run whose cwd never moves annotates (the positive control this pair rests on)", async () => {
+  const repo = scratchRepo();
+  try {
+    const { envelope, result } = await runInProcess(repo, repo.plainFixture);
+    assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+    const annotated = envelope.specs.filter((s) => s.status === "annotated");
+    assert.equal(
+      annotated.length,
+      1,
+      `the control MUST annotate or the chdir arm proves nothing: ${JSON.stringify(envelope.specs)}`,
+    );
+    assert.equal(annotated[0]!.line_number, repo.annotationLineOf(repo.plainFixture) + 1);
+    assert.deepEqual(annotated[0]!.intent, {
+      entity: "Cart",
+      action: "apply promo code",
+      behavior: "applies the discount when the code is valid",
+      layer: "unit",
+    });
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("in-process: a mid-run chdir does not change the annotation — the repo root is bound once at run start", async () => {
+  const repo = scratchRepo();
+  try {
+    const control = await runInProcess(repo, repo.plainFixture);
+    const moved = await runInProcess(repo, repo.chdirFixture);
+
+    assert.equal(moved.result.code, 0, `stderr: ${moved.result.stderr}`);
+
+    // The fixtures are line-for-line identical apart from the chdir call, so
+    // the (status, intent, file_path, line_number) shape must match exactly.
+    // Pre-fix this arm shipped every row `unannotated` with `intent: null`.
+    const shape = (e: Envelope): unknown =>
+      e.specs
+        .map((s) => ({
+          file: s.file_path.replace(/^(plain|moves)\.test\.js$/, "FIXTURE.test.js"),
+          line: s.line_number,
+          status: s.status,
+          intent: s.intent,
+        }))
+        .sort((a, b) => a.line - b.line);
+
+    assert.deepEqual(shape(moved.envelope), shape(control.envelope));
+
+    // ...and state the positive half directly, so a pair that degrades to
+    // "neither annotates" fails here rather than passing on equality alone.
+    assert.equal(moved.envelope.specs.filter((s) => s.status === "annotated").length, 1);
+    // The row's own path stays repo-relative — a late root read relativized
+    // it against `<root>/sub` and it fell back to the absolute path.
+    assert.ok(
+      moved.envelope.specs.every((s) => !s.file_path.startsWith("/")),
+      `file paths must stay repo-relative: ${JSON.stringify(moved.envelope.specs.map((s) => s.file_path))}`,
+    );
+  } finally {
+    repo.cleanup();
   }
 });

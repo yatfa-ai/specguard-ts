@@ -13,7 +13,11 @@ export interface ReporterEvent {
 export interface ReporterOptions {
   /** Overrides the process environment (tests). */
   env?: RunnerEnv;
-  /** Repo root for relativizing file paths (tests). Defaults to cwd. */
+  /**
+   * Repo root for relativizing file paths (tests). Defaults to the cwd read
+   * ONCE at run start — the same value reaches both the collector and the
+   * annotation pass, so a mid-run chdir cannot split them.
+   */
   repoRoot?: string;
   /** Transport injection (tests). */
   transport?: TransportDeps;
@@ -38,7 +42,13 @@ export async function* specguardReporter(
   options: ReporterOptions = {},
 ): AsyncGenerator<string> {
   const env = options.env ?? readRunnerEnv();
-  const collector = new RunCollector(options.repoRoot ?? process.cwd());
+  // Bind the repo root ONCE, at run start, and thread that same value into
+  // `finish` — mirroring src/jest/reporter.ts and src/vitest/reporter.ts.
+  // Reading the cwd again at finish time would let a mid-run chdir
+  // relativize the rows against one root and key the annotation join against
+  // another, silently shipping every annotated row as `unannotated`.
+  const repoRoot = options.repoRoot ?? process.cwd();
+  const collector = new RunCollector(repoRoot);
 
   for await (const ev of source) {
     try {
@@ -61,7 +71,7 @@ export async function* specguardReporter(
     yield "";
   }
 
-  await finish(collector, env, options);
+  await finish(collector, env, options, repoRoot);
 }
 
 export default specguardReporter;
@@ -74,6 +84,7 @@ async function finish(
   collector: RunCollector,
   env: RunnerEnv,
   options: ReporterOptions,
+  repoRoot: string,
 ): Promise<void> {
   try {
     const rows = collector.getRows();
@@ -89,8 +100,10 @@ async function finish(
 
     // Slice 4: attempt the annotation pass. It never throws and never
     // changes the exit code — on any failure the slice-1 rows ship as-is
-    // (the pass itself emits at most one warning line).
-    const annotated = annotateRows(rows, { repoRoot: options.repoRoot ?? process.cwd() });
+    // (the pass itself emits at most one warning line). `repoRoot` is the
+    // value bound at run start, the same one the collector relativized
+    // against, so discovery and the coordinate join share one root.
+    const annotated = annotateRows(rows, { repoRoot });
 
     const envelope = buildEnvelope(annotated.rows, env, collector.durationSeconds());
     if (envelope === null) {
