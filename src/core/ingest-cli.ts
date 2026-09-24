@@ -233,7 +233,7 @@ export interface IngestRunOptions {
   drainFs?: DrainFs;
 }
 
-/** The five operations the atomic swap needs, typed against `node:fs/promises` itself. */
+/** The six operations the atomic swap needs, typed against `node:fs/promises` itself. */
 export interface DrainFs {
   realpath: typeof realpath;
   writeFile: typeof writeFile;
