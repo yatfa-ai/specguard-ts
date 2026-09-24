@@ -2207,13 +2207,16 @@ test("SPGD-1462: keeps the queue file's mode through the atomic swap", async () 
     ],
   );
   try {
-    // 0o640 rather than 0o600 so the example cannot pass by accident: 0600 is
-    // exactly the default under umask 077, where this would pass without the fix.
+    // 0o750 rather than 0o600 or 0o640: a umask only ever CLEARS bits from
+    // 0o666, so it can never set an execute bit — no umask makes a fresh file
+    // come back with one, so this mode can only be there if the chmod carried
+    // it. (0o640 is exactly what umask 027 creates, which made the first
+    // fixture vacuous on 027 hosts — the SPGD-1456 finding.)
     const file = tmpFile("mixed.jsonl", `${runLine("ok")}\n${runLine("refused")}\n${runLine("down")}\n`);
-    chmodSync(file, 0o640);
+    chmodSync(file, 0o750);
     const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
     assert.equal(r.code, 2);
-    assert.equal(statSync(file).mode & 0o7777, 0o640, "the rewrite must not reset the file's mode");
+    assert.equal(statSync(file).mode & 0o7777, 0o750, "the rewrite must not reset the file's mode");
     assert.equal(readFileSync(file, "utf8"), `${runLine("refused")}\n${runLine("down")}\n`);
     rm(file);
   } finally {
@@ -2235,18 +2238,48 @@ test("SPGD-1462: rewrites a symlinked queue's target, leaving the link itself in
     // a queue reached through a symlink the naive swap would replace the link
     // itself with a regular file — and leave the real target holding every
     // line just accepted, which the next drain would then send again.
-    const dir = mkdtempSync(join(tmpdir(), "specguard-ingest-link-"));
-    const target = join(dir, "target.jsonl");
-    const link = join(dir, "queue-link.jsonl");
+    //
+    // The target lives in a DIFFERENT directory from the link, and carries a
+    // mode with an execute bit (0o750): one example then pins realpath
+    // resolution (a rename over `path` would leave the untouched target in the
+    // other directory), the mode carried THROUGH the link (`lstat(path)` would
+    // read the link's 0o777 instead of the target's), and the temp's placement
+    // beside the RESOLVED target — the observed rename below runs between two
+    // directories unless the temp was built in `dirname(realpath)`, the only
+    // placement that keeps `rename(2)` atomic on one filesystem.
+    const linkDir = mkdtempSync(join(tmpdir(), "specguard-ingest-link-"));
+    const targetDir = mkdtempSync(join(tmpdir(), "specguard-ingest-target-"));
+    const target = join(targetDir, "target.jsonl");
+    const link = join(linkDir, "queue-link.jsonl");
     writeFileSync(target, `${runLine("ok")}\n${runLine("refused")}\n${runLine("down")}\n`);
+    chmodSync(target, 0o750);
     symlinkSync(target, link);
 
-    const r = await runCli(["--drain", link], srv.url, queueOverrides(link));
-    assert.equal(r.code, 2);
+    const observed: Record<string, boolean> = {};
+    const realRename = rename;
+    const drainFs: DrainFs = realDrainFs({
+      rename: async (from, to) => {
+        observed.sameDir = dirname(from.toString()) === dirname(to.toString());
+        await realRename(from, to);
+      },
+    });
+    const o = out();
+    const e = out();
+    const code = await run(["--drain", link], o.stream, e.stream, {
+      env: envFor(srv.url, queueOverrides(link)),
+      drainFs,
+    });
+    assert.equal(code, 2);
+    assert.equal(observed.sameDir, true, "the temp must be built beside the resolved target, not beside the link");
     assert.equal(lstatSync(link).isSymbolicLink(), true);
     assert.equal(readlinkSync(link), target);
     assert.equal(readFileSync(target, "utf8"), `${runLine("refused")}\n${runLine("down")}\n`);
-    rmSync(dir, { recursive: true, force: true });
+    assert.equal(statSync(target).mode & 0o7777, 0o750, "the mode must be carried through the link, not read off it");
+    const strayTemps = (d: string): string[] => readdirSync(d).filter((f) => f.includes(".drain-"));
+    assert.deepEqual(strayTemps(linkDir), [], "no stray temp left in the link's directory");
+    assert.deepEqual(strayTemps(targetDir), [], "no stray temp left in the target's directory");
+    rmSync(linkDir, { recursive: true, force: true });
+    rmSync(targetDir, { recursive: true, force: true });
   } finally {
     await srv.close();
   }
