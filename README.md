@@ -225,7 +225,7 @@ A file that was only partly accepted is resumed from the line the report named, 
 re-sent — the numbering never shifts between invocations that do not drain (`--drain` is the one
 exception: removing the accepted lines renumbers what is left, so a drain report's numbers describe
 the file as it was read, not as the next run finds it — see
-[Draining the queue as it is accepted](#draining-the-queue-as-it-is-accepted---drain)):
+[Draining the queue as it is accepted](#draining-the-queue-as-it-is-accepted----drain)):
 
 ```bash
 specguard-ingest --from-line 7 log/test_results.jsonl     # a suffix: skip lines 1-6
