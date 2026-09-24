@@ -1,4 +1,4 @@
-import type { Folding, LineResult, ListedLine, Source, StatusCounts } from "./ingest-cli.js";
+import type { Drained, Folding, LineResult, ListedLine, Source, StatusCounts } from "./ingest-cli.js";
 
 /**
  * `specguard-ingest --json`: the machine-readable renderer over the same
@@ -84,13 +84,14 @@ export function renderDelivery(args: {
   results: LineResult[];
   counts: StatusCounts;
   foldings: Folding[];
+  drained: Drained | null;
 }): string {
-  const { source, results, counts, foldings } = args;
+  const { source, results, counts, foldings, drained } = args;
   return document(
     MODE_DELIVER,
     source,
     results.map((result) => delivered(result)),
-    summary(source, results.length, counts, attempted(counts)),
+    summary(source, results.length, counts, attempted(counts), drained),
     foldings.map((folding) => folded(folding)),
   );
 }
@@ -110,7 +111,7 @@ export function renderListing(args: {
     MODE_LIST,
     source,
     lines.map((line) => listed(line)),
-    summary(source, lines.length, counts, 0),
+    summary(source, lines.length, counts, 0, null),
     [],
   );
 }
@@ -155,14 +156,21 @@ function document(
  * document. It is `null` rather than `[]` where the selector was fully
  * satisfied, on `selector`'s terms: a fact that does not apply is absent,
  * never a fabricated empty.
+ *
+ * `drained` is the `--drain` count, and it is present exactly when the flag
+ * was given — `0` where the flag asked and nothing was accepted, so a consumer
+ * that asked for the drain can always read its outcome here, and a document
+ * without the key is a run that never asked. The listing never carries it:
+ * `--drain --list` is refused before either renderer runs.
  */
 function summary(
   source: Source,
   lines: number,
   counts: StatusCounts,
   attempted: number,
+  drained: Drained | null,
 ): Record<string, unknown> {
-  return {
+  const result: Record<string, unknown> = {
     lines,
     attempted,
     accepted: counts.accepted,
@@ -174,6 +182,15 @@ function summary(
     absent: absent(source),
     selector: selector(source),
   };
+  // The count of removed lines, and only that — the Ruby twin's document is
+  // the shape of record here, key for key, and its `summary.drained` is the
+  // integer (`renderDelivery`'s port note above: two clients emitting
+  // differently-shaped documents for one command is the defect parity exists
+  // to prevent). Whether a rewrite happened at all and how many lines it
+  // left are stated by the human renderer's clause; failed runs shout on
+  // stderr and through the exit code.
+  if (drained !== null) result["drained"] = drained.removed;
+  return result;
 }
 
 /**

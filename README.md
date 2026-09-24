@@ -222,7 +222,10 @@ the instrument in exactly the situation that produces the hazard.
 ### Resuming and selecting lines
 
 A file that was only partly accepted is resumed from the line the report named, rather than blindly
-re-sent — the numbering never shifts:
+re-sent — the numbering never shifts between invocations that do not drain (`--drain` is the one
+exception: removing the accepted lines renumbers what is left, so a drain report's numbers describe
+the file as it was read, not as the next run finds it — see
+[Draining the queue as it is accepted](#draining-the-queue-as-it-is-accepted----drain)):
 
 ```bash
 specguard-ingest --from-line 7 log/test_results.jsonl     # a suffix: skip lines 1-6
@@ -266,7 +269,78 @@ specguard-ingest --from-line=7 log/test_results.jsonl     # the attached form, i
   reading `--list`; that is what keeps this an explicit selector rather than the heuristic this command
   refuses to grow.
 
+### Draining the queue as it is accepted — `--drain`
+
+The replay queue is *runs offered to the endpoint and not accepted* — and until the run is drained, a
+line the endpoint **did** accept stays in it. The next incident's failures append behind it, and
+"re-running the command is the retry" then re-sends every one of those already-accepted runs: harmless
+when the line carries a `ci_run_id` (it folds onto the run it already made), a duplicate row when it
+does not. `--drain` is the opt-in follow-through:
+
+```bash
+specguard-ingest --drain log/test_results.jsonl
+```
+
+```
+line 1: accepted — HTTP 202, test_run_id 41f2c9b8, ci_run_id 17442
+line 2: not delivered — HTTP 503 — upstream is down
+specguard-ingest: delivered 1 of 2 runs from log/test_results.jsonl; 1 could not be delivered; 1 accepted line removed from log/test_results.jsonl
+```
+
+Only the lines answered `202` **in this invocation** are removed — there is no heuristic and nothing is
+guessed at, which is the same line the rest of this command draws. Everything else stays
+**byte for byte, in the file's order**:
+
+- **refused** lines — a `400` is refused every time it is offered, and the payload still needs fixing;
+- **undelivered** lines — the endpoint never stored them, so they were never accepted;
+- **unparseable** lines — never a run, so never accepted;
+- **blank** lines — never anything;
+- every line **`--from-line` or `--lines` held back** — it was not sent, so it was not accepted,
+  whatever the endpoint would have said.
+
+The rewrite is **atomic**: a temporary file in the same directory, renamed over the original, so a
+failure mid-drain leaves the file exactly as it was — and nothing is written at all unless something
+was actually accepted. The swap also keeps the queue file's permissions, and when the queue path is a
+symlink it rewrites the link's target rather than replacing the link.
+
+**The removal renumbers what it leaves.** The rewrite keeps the surviving lines byte for byte and in
+order, and packing them up from the top gives them new numbers: a queue of
+`[accepted, not delivered, accepted]` becomes a two-line file whose former lines 2 and 3 are now lines
+1 and 2 — while the report above still says `line 2`, because that number describes the file **as it
+was read**. That is deliberate: the report is a receipt about the file this invocation opened, and
+emitting post-drain numbers would make it disagree with the file it read. So do **not** feed a drain
+report's numbers to the next command's `--from-line` or `--lines` — when lines remain, the summary's
+drain clause says so in as many words. The resume is simply: re-run `--list` to see the renumbered
+file, or run `--drain` again. The "the numbering never shifts" guarantee holds between invocations
+that do not drain.
+
+**A concurrent append is carried.** The reporter appends to the queue with no lock, so a run can land
+while the deliveries are still going. Bytes appended after the file was read and before the rewrite
+are carried into it verbatim. One window remains — the instant between the final read and the rename —
+and it is disclosed in the code rather than claimed closed; closing it would take a lock in the
+reporter, which is deliberately not this flag's business.
+
+**Only the replay queue is drained.** Another path is refused with a `2` — the local record
+`log/test_results.local.jsonl` is a development record, not a queue, and removing accepted lines from
+it would delete ordinary laptop runs that were never failures. The comparison is exact: the file must
+be spelled as `SPECGUARD_OUTPUT_PATH` (or the default) configures the queue. `--drain` with `--list`
+is refused with a `2` as well — a listing delivers nothing, so there is nothing for it to drain.
+
+The removal is **stated, never silent**: the summary gains the clause above, and the `--json`
+document's `summary` carries a `drained` count (absent without the flag). When lines remain after the
+rewrite, the clause carries its second half and says so: the surviving lines are renumbered, and the
+report's numbers above — which describe the file as it was read — no longer address it. A drain that
+cannot complete is a `2` — the delivery report still prints in full, a warning on stderr names the
+file, and the file is left as it was, because a `0` would read as "drained" about a queue that was
+not.
+
+When the whole queue was accepted, the file is left **empty**, and the next `specguard-ingest` run —
+with or without `--drain` — sends nothing, warns, and exits `0`, exactly as it does over any empty
+file. Draining by default is deliberately not the behaviour: a tool that deletes your queue unless
+told not to has made the product decision for you.
+
 ### Machine-readable output — `--json`
+
 
 An HTTP `400` is the one **permanent** verdict in the exit-code table below: a refused line is refused
 every time it is offered, so the only way to land the run is to learn which specs SpecGuard objected to
@@ -327,6 +401,7 @@ specguard-ingest --json log/test_results.jsonl
 | `summary.blank` / `skipped` | the two ways a line of the file is not a row here, counted rather than dropped |
 | `summary.absent` | the `--lines` numbers the file does not have, in the shorthand you typed them — a number or an `N-M` range per entry — or `null` when the selector was fully satisfied; never `[]`, on `selector`'s terms |
 | `summary.selector` | `"--lines"`, `"--from-line"`, or `null` when nothing was held back |
+| `summary.drained` | with `--drain`: how many accepted lines were removed from the file — `0` where the flag asked and nothing was accepted. Absent without the flag, and never present under `--list`, which cannot drain. When `drained` is greater than `0`, each `lines[].number` refers to the file **before** the drain: the rewrite renumbers the lines it leaves, so those numbers describe the file as it was read and no longer address the rewritten file |
 | `lines[]` | one entry per row, in the file's order |
 | `foldings[]` | folding, **observed**: the lines that went out with one `ci_run_id` and came back with one `test_run_id`. The same statement the text report makes as a sentence |
 
@@ -371,7 +446,8 @@ Four things worth knowing:
 `2` dominates `1`: a file where line 3 was refused and line 7 never arrived exits `2`, because the second
 fact is the one that leaves work undone — both are printed either way; the exit code chooses what to
 shout, never what to say. With `--list` the only reachable codes are `0` (listed) and `2` (bad flag,
-unreadable file): listing delivers nothing, so it can never carry a verdict about a run. The command
+unreadable file): listing delivers nothing, so it can never carry a verdict about a run. With
+`--drain`, a rewrite that could not complete is a `2` as well — the file is left as it was. The command
 **never throws** — a load failure or an internal error is a `2` with one stderr line, not a stack trace.
 
 ## The Vitest reporter

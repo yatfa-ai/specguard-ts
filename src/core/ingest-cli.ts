@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
 import { deliverRawLine, version } from "./transport.js";
 import { renderDelivery, renderListing } from "./ingest-reporter.js";
@@ -21,7 +22,8 @@ import { renderDelivery, renderListing } from "./ingest-reporter.js";
  *   2  this tool could not do its job — bad flags, no endpoint/key, an
  *      unreadable file, an unparseable line, 401/404/429/5xx, a delivery that
  *      never reached the endpoint (no verdict about the run exists in any of
- *      them)
+ *      them); with --drain, a rewrite of <file> that could not complete is a
+ *      2 as well — the file is left as it was
  *
  * 2 dominates: a file where line 3 was refused and line 7 never arrived exits
  * 2, because the second fact is the one that leaves work undone. Both are
@@ -49,7 +51,12 @@ export const EXIT_MISUSE = 2;
  */
 const CONTENT_REFUSAL_CODES: readonly number[] = [400];
 
-const BANNER = "Usage: specguard-ingest [--list] [--from-line N | --lines SPEC] <file>";
+// `[--drain]` sits AFTER <file> deliberately: the banner is pinned by three
+// existing tests as the literal `Usage: specguard-ingest [--list] [--from-line
+// N | --lines SPEC] <file>` substring, and scripts (and the tests) match on
+// that established prefix — so the new flag extends the banner's tail rather
+// than re-flowing its middle.
+const BANNER = "Usage: specguard-ingest [--list] [--from-line N | --lines SPEC] <file> [--drain]";
 
 /** One entry of a `--lines` spec: `12` or `12-15`, and nothing else. */
 const LINE_SPEC_ENTRY = /^(\d+)(?:-(\d+))?$/;
@@ -134,6 +141,14 @@ export interface Options {
   json: boolean;
   /** Set by `-v`/`--version`: the identity query short-circuits the run. */
   version: boolean;
+  /**
+   * The follow-through: after the deliveries, remove from <file> exactly the
+   * lines this invocation got a 202 for. Delivery-shaped and opt-in — it
+   * changes nothing about what is sent, only what happens to <file>
+   * afterwards, and the guards in {@link parseOptions}/{@link run} hold it to
+   * the configured replay queue and refuse it a listing.
+   */
+  drain: boolean;
 }
 
 /**
@@ -160,6 +175,41 @@ export interface Source {
   /** The `--lines` numbers the file does not have, each a number or an `N-M` range, in the shorthand typed. */
   absent: string[];
   selector: "from-line" | "lines";
+  /**
+   * The drain's inputs, captured by {@link readSource} and by nothing else:
+   * the file's exact bytes as of the read, and that read's length in bytes.
+   * The rebuild keeps `raw`'s lines minus the accepted numbers — which is what
+   * makes "byte for byte" a property of the rewrite rather than a hope — and
+   * `readBytes` is where the tail starts: anything appended past it while the
+   * deliveries ran is carried into the rewrite verbatim. They are members of
+   * {@link Source} rather than a second read inside the drain because the
+   * length that matters is the one the numbered lines were counted against; a
+   * fresh read at drain time would answer a different read. The default path
+   * never looks at either member; the whole capture is the drain's.
+   */
+  raw: Buffer;
+  readBytes: number;
+}
+
+/**
+ * What `--drain` did, decided once in {@link drainSource} and rendered by both
+ * renderers — the same one-fact-two-renderings discipline the status counts
+ * and the folding groups are held to. `removed` is the count of lines taken
+ * out of the file (0 when nothing was accepted, so no rewrite happened at
+ * all), `remaining` is the count of lines the rewrite LEFT in the file — kept
+ * plus the carried tail, counted as lines (blank lines included), so a
+ * renderer can tell a queue that still holds work from one the drain emptied.
+ * `remaining` is meaningful only where a rewrite actually happened: on the
+ * no-accept and failed paths the file did not move, so it stays `null`.
+ * `failed` is a rewrite that could not complete: the file was left as it was,
+ * the warning is already on stderr, and the exit code is a 2, because a 0
+ * would read as "drained" about a queue that was not. `null` — no {@link Drained}
+ * at all — is the flag's absence, and both renderers render nothing for it.
+ */
+export interface Drained {
+  removed: number;
+  remaining: number | null;
+  failed: boolean;
 }
 
 class UsageError extends Error {}
@@ -173,7 +223,28 @@ export interface IngestRunOptions {
   env?: Record<string, string | undefined>;
   /** Transport injection (tests). */
   fetchImpl?: typeof fetch;
+  /**
+   * The drain's filesystem surface, injectable for tests (defaults to
+   * `node:fs/promises`). The Ruby twin's spec patches `File.rename` to force a
+   * failure mid-rewrite; ESM imports cannot be patched, so the same example is
+   * possible here only through a seam — the same trade `fetchImpl` already
+   * makes for the delivery.
+   */
+  drainFs?: DrainFs;
 }
+
+/** The six operations the atomic swap needs, typed against `node:fs/promises` itself. */
+export interface DrainFs {
+  realpath: typeof realpath;
+  writeFile: typeof writeFile;
+  stat: typeof stat;
+  chmod: typeof chmod;
+  rename: typeof rename;
+  unlink: typeof unlink;
+}
+
+/** The real filesystem — the drain's default, used whenever no test injects one. */
+const REAL_DRAIN_FS: DrainFs = { realpath, writeFile, stat, chmod, rename, unlink };
 
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -295,6 +366,13 @@ async function readSource(options: Options, procEnv: Record<string, string | und
     // the typed numbers against.
     absent: absentEntries(options, number),
     selector: options.lineSet !== null ? "lines" : "from-line",
+    // The drain's capture, taken here and for that reason: `raw` is the exact
+    // buffer the numbered lines were cut from, and `readBytes` is its length —
+    // so anything appended after this method returns starts strictly past
+    // `readBytes`, and the delivered set can never name it. One read serves
+    // both jobs; the default path never looks at either member.
+    raw,
+    readBytes: raw.length,
   };
 }
 
@@ -370,6 +448,7 @@ function parseOptions(argv: string[]): Options | null {
   let lineSet: LineRange[] | null = null;
   let list = false;
   let json = false;
+  let drain = false;
   const files: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -384,12 +463,20 @@ function parseOptions(argv: string[]): Options | null {
       // never the set that is listed or sent and never the code that is
       // returned. No single-dash short form exists, here or in the Ruby twin.
       json = true;
+    } else if (arg === "--drain") {
+      // Delivery-shaped and opt-in, and --drain takes no value: like --list
+      // and --json it is an exact-match flag with no attached form, so
+      // `--drain=1` falls through to the `invalid option` arm below rather
+      // than being half-understood. What it does is decided downstream: the
+      // guards there hold it to the configured replay queue and refuse it a
+      // listing.
+      drain = true;
     } else if (arg === "--version" || arg === "-v") {
       // The identity query, exactly like --help above: it short-circuits the
       // parse — before the no-file check, before --json is considered, and
       // before any file is read — so a version-only run needs no file, no
       // endpoint and no API key. The caller prints the one line and exits 0.
-      return { path: "", fromLine: 1, list: false, lineSet: null, json: false, version: true };
+      return { path: "", fromLine: 1, list: false, lineSet: null, json: false, version: true, drain: false };
     } else if (arg === "--from-line" || arg === "--lines") {
       const value = argv[i + 1];
       if (value === undefined) {
@@ -433,6 +520,18 @@ function parseOptions(argv: string[]): Options | null {
     );
   }
 
+  // `--drain` follows the delivery; `--list` is the refusal to deliver. They
+  // are not an intersection to resolve but two answers to "does this run send
+  // anything", and a listing that also drained would either drain nothing
+  // silently or drain without the deliveries the removal is keyed to — both
+  // are the quiet-failure shape this file refuses.
+  if (drain && list) {
+    throw new UsageError(
+      "--drain delivers and removes the lines that were accepted; " +
+        "--list delivers nothing, so there is nothing for it to drain",
+    );
+  }
+
   return {
     path: files[0]!,
     fromLine: fromLine ?? 1,
@@ -440,6 +539,7 @@ function parseOptions(argv: string[]): Options | null {
     lineSet,
     json,
     version: false,
+    drain,
   };
 }
 
@@ -507,12 +607,31 @@ function helpText(): string {
     "nothing. It needs no SPECGUARD_ENDPOINT and no SPECGUARD_API_KEY. It",
     "composes with --from-line and --lines.",
     "",
+    "--drain is the follow-through, and it is opt-in: after the deliveries, the",
+    "lines this invocation got a 202 for are removed from <file>, so the next",
+    "incident's failures do not land behind runs that already landed. Everything",
+    "else stays byte for byte and in order — refused, undelivered, unparseable",
+    "and blank lines, and every line --from-line or --lines held back. Removing",
+    "lines renumbers what is left: the report's line numbers describe <file> as",
+    "it was read, not as the next run finds it, so resume by re-running --list",
+    "(or --drain) rather than reusing those numbers. The rewrite is atomic — a",
+    "temporary file in the same directory, renamed over the original — so a",
+    "failure mid-drain leaves the file as it was, and bytes appended while the",
+    "deliveries ran are carried into the rewrite. Only the replay queue is",
+    "drained — another path is refused, because the local record is a",
+    "development record, not a queue — and --drain with --list is refused too,",
+    "since a listing delivers nothing for it to drain.",
+    "",
     "Options:",
     "  --list            List the runs in <file> without delivering any of them",
     "  --from-line N     Start at line N of <file>, skipping the lines before it",
     "  --lines SPEC      Deliver only the lines SPEC names — numbers and ranges",
     "                    over <file>'s own numbering, e.g. 3,7,12-15. Not",
     "                    combinable with --from-line",
+    "  --drain           After delivering, remove from <file> exactly the lines",
+    "                    this run accepted — atomically, keeping every other",
+    "                    line byte for byte. Only the configured replay queue",
+    "                    is drained, and --list delivers nothing for it to drain",
     "  --json            Emit one JSON document on stdout instead of the human report",
     "  -v, --version     Print the version (specguard-ts <version>) and exit",
     "  -h, --help        Print this help and exit",
@@ -526,7 +645,8 @@ function helpText(): string {
     "  2  this tool could not do its job — bad flags, no endpoint or API key,",
     "     an unreadable file, an unparseable line, a delivery that never",
     "     reached the endpoint, or one the endpoint answered without ever",
-    "     reading it (401, 404, 429, 5xx)",
+    "     reading it (401, 404, 429, 5xx). With --drain, a rewrite that could",
+    "     not complete is a 2 as well — the file is left as it was",
     "",
   ].join("\n");
 }
@@ -570,6 +690,26 @@ export async function run(
       return await list(options, stdout, stderr, procEnv);
     }
 
+    // The drain may empty the replay queue and nothing else, and the guard
+    // fires here — after the parse, before the credential checks and the file
+    // read, exactly where the Ruby twin's parse_options refuses: a path that
+    // is not the configured queue is either the local record (a development
+    // record of ordinary keyless runs, where removing accepted lines would
+    // delete runs that were never failures) or a file this invocation was
+    // pointed at by mistake. The comparison is exact string equality, the one
+    // `noSuchFileMessage` makes: a path spelled differently from the
+    // configuration is refused rather than resolved, and SPECGUARD_OUTPUT_PATH
+    // relocates the drain with the queue.
+    if (options.drain) {
+      const sinks = readRunnerEnv({ env: procEnv });
+      if (options.path !== sinks.outputPath) {
+        throw new UsageError(
+          `--drain empties the replay queue, and ${options.path} is not it ` +
+            `(configured as ${sinks.outputPath}) — the local record is a development record, not a queue`,
+        );
+      }
+    }
+
     // Before the file is opened, deliberately: "there is nowhere to send
     // this" is the earlier question, and an unconfigured run should read its
     // one real problem instead of a complaint about a path that was never
@@ -590,8 +730,14 @@ export async function run(
       results.push(await deliverLine(line.number, line.text, env, opts));
     }
 
-    report(source, results, stdout, stderr, options.json);
-    return exitCode(results);
+    // After the deliveries, before the report — the only position where the
+    // summary can state what the drain removed. `drained` is null without the
+    // flag, and both renderers render nothing for it, which is the whole of
+    // the flag being opt-in.
+    const drained = options.drain ? await drainSource(source, results, stderr, opts) : null;
+
+    report(source, results, stdout, stderr, options.json, drained);
+    return exitCode(results, drained);
   } catch (err) {
     // A UsageError is this tool answering its caller — a bad flag, a
     // selector that names nothing sensibly, a file that cannot be opened.
@@ -611,8 +757,11 @@ export async function run(
   }
 }
 
-/** 2 dominates; 1 is produced ONLY over a `refused` result. */
-function exitCode(results: LineResult[]): number {
+/** 2 dominates; 1 is produced ONLY over a `refused` result. A drain that could not complete joins the dominance list ahead of the content verdicts, on the same grounds: a 0 would read as "drained" about a queue that was not. */
+function exitCode(results: LineResult[], drained: Drained | null): number {
+  if (drained !== null && drained.failed) {
+    return EXIT_MISUSE;
+  }
   if (results.some((r) => r.status === "undelivered" || r.status === "unparseable")) {
     return EXIT_MISUSE;
   }
@@ -743,6 +892,184 @@ function blankClause(source: Source): string {
 }
 
 /**
+ * The drain's clause, present exactly when lines were removed and never
+ * otherwise — the summary's established shape, where a clause names a fact
+ * that is positive rather than padding the line with zeroes. The `removed: 0`
+ * of a rewrite that did not happen (nothing was accepted) needs no clause:
+ * the accepted count in the first clause already says so. The `removed: 0` of
+ * a rewrite that FAILED is carried by the stderr warning and by the exit
+ * code, both louder than a clause would be.
+ *
+ * The clause's second half states the consequence the removal has for the
+ * numbers this very report just printed: a rewrite that leaves any line in
+ * the file renumbers them, because the survivors are packed up from the top —
+ * so the numbers above describe the file as it was READ, not as the next
+ * invocation will find it, and must not be reused to address it. A drain that
+ * emptied the file says nothing extra: there is no number left for the
+ * sentence to be about.
+ */
+function drainClause(source: Source, drained: Drained): string {
+  const clause = `${drained.removed} accepted line${drained.removed === 1 ? "" : "s"} removed from ${source.path}`;
+  if (drained.remaining === null || drained.remaining <= 0) return clause;
+  const left = drained.remaining;
+  return (
+    clause +
+    ` — the ${left} line${left === 1 ? "" : "s"} left ${left === 1 ? "is" : "are"} now numbered from 1, ` +
+    `so the numbers above no longer address ${left === 1 ? "it" : "them"}`
+  );
+}
+
+/**
+ * `--drain`: remove from <file> exactly the lines this invocation got a 202
+ * for, atomically, carrying anything appended while the deliveries ran.
+ *
+ * == What is removed, and what is not
+ *
+ * Only `accepted` results, by their own file-line numbers — the removal is
+ * keyed to what the endpoint answered this run, never to a guess about which
+ * lines were failures. Everything else {@link Source.raw} holds is kept:
+ * refused, undelivered and unparseable lines, the blank ones, and every line
+ * a selector held back — each byte for byte, in the file's order.
+ *
+ * == The tail, carried
+ *
+ * The reporter appends to the queue with no lock (`transport.ts`'s plain
+ * `append`), so bytes can land after {@link readSource} and before this
+ * rewrite. Those bytes are the tail: everything in the file NOW past the
+ * length read then, carried into the rewrite verbatim. They were never
+ * delivered, so the accepted set can never name them — carrying them is what
+ * keeps a concurrent append from being destroyed by the very run that emptied
+ * the queue.
+ *
+ * == The residual race, disclosed rather than closed
+ *
+ * The tail read below is as late as the design can put it, which narrows the
+ * race to read → rename: bytes a reporter appends AFTER that read but BEFORE
+ * the rename lands go to the old inode and are lost when the rename swaps the
+ * directory entry. The window is two syscalls wide and is NOT closed —
+ * closing it would take a lock in the reporter, and that is deliberately out
+ * of scope here. What this code claims is narrower: everything appended
+ * before the final read survives, and a failure at any point before the
+ * rename leaves the original byte-identical.
+ *
+ * Nothing is written unless something was accepted: a drain over a file whose
+ * every line was refused, or whose selector held everything back, leaves the
+ * file — and its mtime — exactly as it was.
+ */
+async function drainSource(
+  source: Source,
+  results: LineResult[],
+  stderr: IngestStream,
+  opts: IngestRunOptions,
+): Promise<Drained> {
+  const accepted = new Set(
+    results.filter((r) => r.status === "accepted").map((r) => r.number),
+  );
+  if (accepted.size === 0) return { removed: 0, remaining: null, failed: false };
+
+  try {
+    // Binary throughout: `raw` is the file's bytes, and the rebuild is a byte
+    // operation, not a character one. The split below runs on the same `\n`
+    // walk `readSource` numbered the lines with, so `number` here is the
+    // number the reports printed.
+    const kept = keptBytes(source.raw, accepted);
+
+    const current = await readFile(source.path);
+    const appended =
+      current.length > source.readBytes ? current.subarray(source.readBytes) : Buffer.alloc(0);
+
+    const rewritten = Buffer.concat([kept, appended]);
+    await drainWrite(source.path, rewritten, opts.drainFs ?? REAL_DRAIN_FS);
+    // Counted as LINES, on the split the numbering itself was built on —
+    // never as bytes: a blank line counts, and a queue the drain emptied
+    // reads 0 rather than 1.
+    return { removed: accepted.size, remaining: countLines(rewritten), failed: false };
+  } catch (err) {
+    // Stated, never silent — and reported without costing the delivery
+    // report: stdout below is still the full per-line report, this warning
+    // names the file, and exitCode turns the run into a 2, because a 0 would
+    // read as "drained" about a queue that was not.
+    const reason = err instanceof Error ? err.message : String(err);
+    stderr.write(
+      `specguard-ingest: warning: could not remove the accepted lines from ${source.path}: ` +
+        `${reason} — the file is left as it was\n`,
+    );
+    return { removed: 0, remaining: null, failed: true };
+  }
+}
+
+/** The file's bytes minus the accepted line numbers — each survivor with the `\n` it ended in, in the file's order, byte for byte. */
+function keptBytes(raw: Buffer, accepted: Set<number>): Buffer {
+  const parts: Buffer[] = [];
+  const newline = Buffer.from("\n");
+  let start = 0;
+  let number = 0;
+  const consider = (chunk: Buffer, isLast: boolean): void => {
+    if (isLast && chunk.length === 0) return; // the file's final `\n`, not a line
+    number += 1;
+    if (accepted.has(number)) return;
+    parts.push(chunk);
+    // Every line but the last one ended in the `\n` this walk split on — the
+    // last only when the file itself ended in one. Putting it back here is
+    // what makes "byte for byte" true of the rewrite rather than a hope.
+    if (!isLast) parts.push(newline);
+  };
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw[i] === 0x0a) {
+      consider(raw.subarray(start, i), false);
+      start = i + 1;
+    }
+  }
+  consider(raw.subarray(start), true);
+  return Buffer.concat(parts);
+}
+
+/** Lines on `keptBytes`' terms: `\n`-terminated segments, plus a trailing line the file ended without. 0 for empty. */
+function countLines(buf: Buffer): number {
+  let count = 0;
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0x0a) {
+      count += 1;
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) count += 1;
+  return count;
+}
+
+/**
+ * The atomic swap: a temporary file in the SAME directory as the RESOLVED
+ * target — `rename` is only atomic within one filesystem — renamed over it. A
+ * failure at any point before the rename leaves the original untouched, and
+ * the `finally` takes the temporary with it. The rename lands on the resolved
+ * target (`realpath`), so a queue reached through a symlink is rewritten at
+ * the file the link points to and the link itself survives: `rename(2)`
+ * replaces the directory entry at the path given to it, and without this the
+ * swap would turn the link into a regular file while the real target kept
+ * every line just accepted — lines the next drain would then send again. The
+ * replacement is chmod'ed to the target's mode before the swap, because
+ * `writeFile` creates it under the umask's defaults and a queue restricted to
+ * 0600 would come back 0644 as a fresh inode. Ownership is deliberately NOT
+ * carried over: `chown` needs privilege, and in practice the drain runs as
+ * the queue's owner.
+ */
+async function drainWrite(path: string, content: Buffer, fs: DrainFs): Promise<void> {
+  const target = await fs.realpath(path);
+  const tmp = join(
+    dirname(target),
+    `.${basename(target)}.drain-${process.pid}-${Math.trunc(Math.random() * 0x100000000).toString(36)}.tmp`,
+  );
+  try {
+    await fs.writeFile(tmp, content);
+    await fs.chmod(tmp, (await fs.stat(target)).mode & 0o7777);
+    await fs.rename(tmp, target);
+  } finally {
+    await fs.unlink(tmp).catch(() => undefined); // gone when the rename succeeded
+  }
+}
+
+/**
  * The typed numbers the file does not have, named rather than counted —
  * {@link skippedClause}'s counterpart for the other direction: that one says
  * how much of the FILE the selector held back, and this one says how much of
@@ -787,6 +1114,7 @@ function report(
   stdout: IngestStream,
   stderr: IngestStream,
   json: boolean,
+  drained: Drained | null,
 ): void {
   if (results.length === 0) {
     stderr.write(
@@ -803,14 +1131,14 @@ function report(
   const foldings = foldedRuns(results);
 
   if (json) {
-    stdout.write(renderDelivery({ source, results, counts, foldings }));
+    stdout.write(renderDelivery({ source, results, counts, foldings, drained }));
     return;
   }
 
   for (const result of results) {
     stdout.write(`${lineReport(result)}\n`);
   }
-  stdout.write(`${summaryLine(source, results, counts)}\n`);
+  stdout.write(`${summaryLine(source, results, counts, drained)}\n`);
   for (const folding of foldings) {
     stdout.write(
       `specguard-ingest: lines ${folding.numbers.join(", ")} carried ci_run_id ${folding.ciRunId} ` +
@@ -819,7 +1147,12 @@ function report(
   }
 }
 
-function summaryLine(source: Source, results: LineResult[], counts: StatusCounts): string {
+function summaryLine(
+  source: Source,
+  results: LineResult[],
+  counts: StatusCounts,
+  drained: Drained | null,
+): string {
   const parts = [
     `specguard-ingest: delivered ${counts.accepted} of ${plural(results.length, "run")} from ${source.path}`,
   ];
@@ -829,6 +1162,7 @@ function summaryLine(source: Source, results: LineResult[], counts: StatusCounts
   if (source.blank > 0) parts.push(blankClause(source));
   if (source.skipped > 0) parts.push(skippedClause(source));
   if (source.absent.length > 0) parts.push(absentClause(source));
+  if (drained !== null && drained.removed > 0) parts.push(drainClause(source, drained));
   return parts.join("; ");
 }
 
