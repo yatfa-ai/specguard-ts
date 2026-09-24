@@ -66,7 +66,21 @@ export SPECGUARD_TIMEOUT=10         # optional; seconds, applied to the whole de
 **The API key is the switch.** With no key nothing is sent anywhere and the run is written to
 `log/test_results.local.jsonl` — the **local development record** — so local development needs no opt-out
 and a fork with no secret configured behaves like a laptop rather than like a broken build. Its name is
-configurable via `SPECGUARD_LOCAL_OUTPUT_PATH`.
+configurable via `SPECGUARD_LOCAL_OUTPUT_PATH`. The write itself is silent when it succeeds — the
+ordinary case on any machine that can create `log/` — and a run whose local write failed says so instead
+of staying quiet:
+
+**When the local file cannot be written, the keyless run is not silently lost.** A read-only mount, a
+full disk, a regular file sitting where the directory should be: the reporter prints **one** line to
+stderr naming the **configured** path and the underlying error, whatever it is, and the test run is
+unaffected. Nothing goes to the replay queue, and the outcome is still `"skipped"`. The path in the line
+is the client's own — the one your configuration set — and it has to be, because a failure like a closed
+stream carries no path of its own:
+
+```
+SpecGuard: could not write telemetry to log/test_results.local.jsonl
+(closed stream). The test run is unaffected.
+```
 
 **A failed delivery is never silent.** If the endpoint refuses the run (a `401` from a
 rotated key, a `400`, a `500`) or cannot be reached at all, the reporter prints **one** line to stderr
@@ -133,7 +147,7 @@ Two kinds of run end up on disk instead of on the platform, and they mean differ
 
 | File | Written when | Default name | Override |
 | --- | --- | --- | --- |
-| local development record | no API key is configured (the key is the switch) | `log/test_results.local.jsonl` | `SPECGUARD_LOCAL_OUTPUT_PATH` |
+| local development record | no API key is configured (the key is the switch); a failed write prints one stderr line naming the configured path and the error | `log/test_results.local.jsonl` | `SPECGUARD_LOCAL_OUTPUT_PATH` |
 | the **replay queue** | a delivery was attempted and not accepted | `log/test_results.jsonl` | `SPECGUARD_OUTPUT_PATH` |
 
 The split is the fix, not decoration: **nothing on a written line records which sink it was destined for**,

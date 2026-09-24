@@ -246,6 +246,53 @@ test("no API key: nothing is sent anywhere, the run goes to the LOCAL sink, sile
   assert.match(s.writes[0] ?? "", /commit_sha/);
 });
 
+// --- SPGD-1446: the keyless failure arm is documented ------------------------
+//
+// The keyless write has a failure arm: when the local record cannot be
+// written, `deliver` prints ONE stderr line naming the configured path and the
+// underlying error, and the run is unaffected — the outcome stays "skipped"
+// and the replay queue is never touched. The README documented the success
+// arm only. The seal below is extraction-based (the d045e53 template): it
+// EXTRACTS the emitted line and asserts the README carries it verbatim, so it
+// fails against any README that does not document this arm — no expectation
+// assembled only from tokens the README already contained can pass vacuously.
+// The driver is `new Error("closed stream")` deliberately: its message
+// carries no path, so the path in the emitted line can only be the configured
+// `localOutputPath`.
+
+test("SPGD-1446: the keyless write-failure line is documented in the README", async () => {
+  const s = sink();
+  const result = await deliver(
+    envelope(),
+    env({ apiKey: null, localOutputPath: "log/test_results.local.jsonl" }),
+    {
+      warn: s.warn,
+      appendFileImpl: async () => {
+        throw new Error("closed stream");
+      },
+    },
+  );
+  // The failure arm changes nothing about the delivery result: the outcome is
+  // still "skipped", and the replay queue is never touched.
+  assert.deepEqual(result, { delivered: false, outcome: "skipped" });
+  assert.equal(s.writes.length, 0);
+  // Exactly one warning — the failure line itself, no more.
+  assert.equal(s.warnings.length, 1);
+  // THE SEAL: extract the emitted line and assert the README carries it
+  // verbatim. Whitespace is collapsed on both sides because the README wraps
+  // its sample blocks; everything else must match byte for byte.
+  const emitted = s.warnings[0] ?? "";
+  const readme = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "README.md"),
+    "utf8",
+  );
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  assert.ok(
+    flat(readme).includes(flat(emitted)),
+    `README.md must document the keyless failure line verbatim; emitted:\n${emitted}`,
+  );
+});
+
 test("the two sinks are separate files: a refused delivery lands in the replay queue ONLY", async () => {
   // The pin behind the split: keyless runs and failed deliveries must never
   // share a file, because nothing on a written line says which sink it was
