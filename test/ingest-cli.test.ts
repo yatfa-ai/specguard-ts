@@ -2068,14 +2068,29 @@ test("SPGD-1462: refuses to combine with --list, leaving the file untouched", as
 });
 
 test("SPGD-1462: --drain takes no value — the attached form is an invalid option, like --list and --json", async () => {
-  const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
   try {
-    const r = await runCli(["--drain=1", file]);
-    assert.equal(r.code, 2);
-    assert.match(r.stderr, /invalid option: --drain=1/);
-    rm(file);
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+    try {
+      const r = await runCli(["--drain=1", file]);
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /invalid option: --drain=1/);
+      rm(file);
+
+      // The exact name without a value IS the flag: the same file drains.
+      // (This half is what makes the example red-first — on unfixed b741012
+      // both spellings are `invalid option`, so the refusal alone would pass.)
+      const bare = tmpFile("q2.jsonl", `${runLine("a")}\n`);
+      const ok = await runCli(["--drain", bare], srv.url, queueOverrides(bare));
+      assert.equal(ok.code, 0);
+      assert.equal(srv.bodies.length, 1);
+      assert.equal(readFileSync(bare).length, 0);
+      rm(bare);
+    } finally {
+      // temp dirs removed above
+    }
   } finally {
-    // nothing to close
+    await srv.close();
   }
 });
 
