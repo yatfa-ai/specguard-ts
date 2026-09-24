@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
 import { deliverRawLine, version } from "./transport.js";
 import { renderDelivery, renderListing } from "./ingest-reporter.js";
@@ -236,14 +237,14 @@ function decodeUtf8Strict(buf: Buffer): string | null {
  * unparseable verdict (delivery) or a row (listing) rather than an exception,
  * so one corrupt line cannot stop the other thirty-nine from delivering.
  */
-async function readSource(options: Options): Promise<Source> {
+async function readSource(options: Options, procEnv: Record<string, string | undefined>): Promise<Source> {
   const path = options.path;
   let raw: Buffer;
   try {
     raw = await readFile(path);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") throw new UsageError(`no such file: ${path}`);
+    if (code === "ENOENT") throw new UsageError(noSuchFileMessage(path, procEnv));
     if (code === "EISDIR") throw new UsageError(`not a file: ${path}`);
     throw new UsageError(
       `could not read ${path}: ${err instanceof Error ? err.message : String(err)}`,
@@ -295,6 +296,36 @@ async function readSource(options: Options): Promise<Source> {
     absent: absentEntries(options, number),
     selector: options.lineSet !== null ? "lines" : "from-line",
   };
+}
+
+/**
+ * The `no such file` refusal, with one conditional clause: when the missing
+ * path IS the configured replay queue and the configured local record exists,
+ * name the record. A keyless developer is pointed at
+ * `log/test_results.jsonl` by the help while their run wrote the other file,
+ * and this is the one moment the tool can say so. The guard is the
+ * conjunction — equality, not "the path looks like a queue", and an
+ * existence check, not "the record is merely configured" — so an ordinary
+ * typo keeps the plain message byte-for-byte, and the clause cannot fire on
+ * a relative default that happens to resolve against the working directory.
+ *
+ * The sink pair is resolved HERE, on the error path only, through
+ * `readRunnerEnv` — never re-implemented, and never resolved eagerly: the
+ * `--list` arm reaches `readSource` before any environment work, and a
+ * successful listing must not start paying for it (mirrors the Ruby client,
+ * which constructs its own Configuration inside the same arm).
+ */
+function noSuchFileMessage(path: string, procEnv: Record<string, string | undefined>): string {
+  const sinks = readRunnerEnv({ env: procEnv });
+  const local = sinks.localOutputPath;
+  if (path === sinks.outputPath && existsSync(local)) {
+    return (
+      `no such file: ${path} — the replay queue was never written, but the ` +
+      `local record ${local} does exist (what the reporters write when ` +
+      `no API key is configured)`
+    );
+  }
+  return `no such file: ${path}`;
 }
 
 /** The whole of the selection, decided in one place. `--lines` keeps whatever it does not name; `--from-line` keeps a prefix. */
@@ -458,9 +489,12 @@ function helpText(): string {
   return [
     BANNER,
     "",
-    "Re-delivers a saved run to SpecGuard's ingest endpoint. <file> is a",
-    "log/test_results.jsonl written by the reporters — one whole run per line,",
-    "byte-for-byte the body the endpoint was offered.",
+    "Re-delivers a saved run to SpecGuard's ingest endpoint. <file> is a file",
+    "the reporters wrote — one whole run per line, byte-for-byte the body the",
+    "endpoint was offered. The reporters write failed deliveries to the replay",
+    "queue, log/test_results.jsonl, and — when no API key is configured —",
+    "ordinary local runs to the local development record,",
+    "log/test_results.local.jsonl.",
     "",
     "EVERY line in <file> is delivered — or, when you narrow it, every line",
     "--from-line or --lines names. The queue mixes nothing by construction since",
@@ -515,6 +549,12 @@ export async function run(
       return EXIT_OK;
     }
 
+    // Resolved ONCE, for every arm that needs the environment: the delivery
+    // arm's credential checks and transport, and the `no such file` clause in
+    // `readSource` on BOTH arms (a missing configured queue is diagnosable
+    // from `--list` too — that is the arm a keyless developer actually runs).
+    const procEnv = opts.env ?? process.env;
+
     if (options.version) {
       // One line, exit 0 — reached before the no-file check, the credential
       // checks and any file read, mirroring the Ruby client's `-v, --version`.
@@ -527,14 +567,14 @@ export async function run(
     // API key was set. A listing that demanded credentials would be
     // unavailable in exactly the case it exists for.
     if (options.list) {
-      return await list(options, stdout, stderr);
+      return await list(options, stdout, stderr, procEnv);
     }
 
     // Before the file is opened, deliberately: "there is nowhere to send
     // this" is the earlier question, and an unconfigured run should read its
     // one real problem instead of a complaint about a path that was never
     // the point.
-    const env = readRunnerEnv({ env: opts.env ?? process.env });
+    const env = readRunnerEnv({ env: procEnv });
     if (env.endpoint === null) {
       stderr.write("specguard-ingest: error: no endpoint is configured (set SPECGUARD_ENDPOINT)\n");
       return EXIT_MISUSE;
@@ -544,7 +584,7 @@ export async function run(
       return EXIT_MISUSE;
     }
 
-    const source = await readSource(options);
+    const source = await readSource(options, procEnv);
     const results: LineResult[] = [];
     for (const line of source.lines) {
       results.push(await deliverLine(line.number, line.text, env, opts));
@@ -797,8 +837,13 @@ function summaryLine(source: Source, results: LineResult[], counts: StatusCounts
  * through exitCode — listing makes no request, so no endpoint has read
  * anything and exit 1 is unreachable by construction.
  */
-async function list(options: Options, stdout: IngestStream, stderr: IngestStream): Promise<number> {
-  const source = await readSource(options);
+async function list(
+  options: Options,
+  stdout: IngestStream,
+  stderr: IngestStream,
+  procEnv: Record<string, string | undefined>,
+): Promise<number> {
+  const source = await readSource(options, procEnv);
   const lines = source.lines.map((line) => listedLine(line.number, line.text));
 
   if (lines.length === 0) {
