@@ -5,12 +5,13 @@ import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, appendFileSync, chmodSync, lstatSync, readdirSync, statSync, readlinkSync } from "node:fs";
+import { chmod, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
-import { run } from "../src/core/ingest-cli.js";
+import { run, type DrainFs } from "../src/core/ingest-cli.js";
 import { version } from "../src/core/transport.js";
 
 const execFileAsync = promisify(execFile);
@@ -1807,4 +1808,524 @@ test("SPGD-1226: --help documents --json in its Options block; the banner text i
   assert.equal(r.code, 0);
   assert.match(r.stdout, /  --json            Emit one JSON document on stdout instead of the human report\n/);
   assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file>/);
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-1462: `--drain` — the follow-through. A successful replay used to leave
+// the queue byte-identical: the next incident's failures appended behind runs
+// that had already landed, and the README's retry gesture — re-running the
+// command — re-sent every one of them. `--drain` removes, atomically, exactly
+// the lines the endpoint accepted IN THIS INVOCATION; everything else stays
+// byte for byte, in the file's order. Port of the Ruby twin's
+// `--drain, emptying the queue as it is accepted` block (SPGD-1450/1455/1456,
+// landed at specguard-rspec 269f8ef), mirrored example for example where the
+// runtime allows: the Ruby spec patches `File.rename`; ESM imports cannot be
+// patched, so the same failure injection runs through a `drainFs` seam on
+// `IngestRunOptions` — the same trade `fetchImpl` already makes for delivery.
+
+/** A refusal (a 400 is the one permanent content verdict) and an outage, shaped like the Ruby block's. */
+const refusalVerdict = { status: 400, body: '{"message":"spec 1: outcome is required"}' };
+const outageVerdict = { status: 503, body: "upstream is down" };
+
+/** The drain empties the CONFIGURED queue and nothing else — a temp file is not the queue until this names it. */
+function queueOverrides(file: string): Record<string, string> {
+  return { SPECGUARD_OUTPUT_PATH: file };
+}
+
+/** The real filesystem, with one replaceable member — the base every drainFs spy builds on. */
+function realDrainFs(overrides: Partial<DrainFs>): DrainFs {
+  return { realpath, writeFile, stat, chmod, rename, unlink, ...overrides };
+}
+
+test("SPGD-1462: empties a queue whose lines were all accepted, and a second --drain sends nothing", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 0);
+    assert.equal(srv.bodies.length, 2);
+    assert.equal(readFileSync(file).length, 0, "an all-accepted queue is 0 bytes after --drain");
+    assert.ok(r.stdout.includes(`; 2 accepted lines removed from ${file}`));
+
+    // The second run — the one the README calls the retry — POSTs nothing over
+    // the empty file, warns exactly as it always has, and still exits 0.
+    const r2 = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r2.code, 0);
+    assert.equal(srv.bodies.length, 2, "the second --drain POSTs nothing");
+    assert.equal(r2.stderr, `specguard-ingest: warning: ${file} holds no runs to deliver\n`);
+    assert.equal(r2.stdout, "");
+    assert.equal(readFileSync(file).length, 0);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: keeps exactly the non-accepted lines of a mixed file, byte for byte, in order", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      refusalVerdict,
+      outageVerdict,
+    ],
+  );
+  try {
+    // Six statuses in one file, as AC2 names them: one accepted line, a blank,
+    // a 400, a 503, an unparseable line, and one that is not valid UTF-8.
+    const invalidUtf8 = Buffer.from([0xff, 0xfe]);
+    const contents = Buffer.concat([
+      Buffer.from(`${runLine("ok")}\n\n${runLine("refused")}\n${runLine("down")}\n{not json\n`),
+      invalidUtf8,
+      Buffer.from("\n"),
+    ]);
+    const file = tmpFile("mixed.jsonl", contents);
+    const kept = Buffer.concat([
+      Buffer.from(`\n${runLine("refused")}\n${runLine("down")}\n{not json\n`),
+      invalidUtf8,
+      Buffer.from("\n"),
+    ]);
+
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    // 2 dominates: the refused line and the undelivered one are both still in
+    // the file, and the exit code shouts the one that leaves work undone.
+    assert.equal(r.code, 2);
+    assert.equal(srv.bodies.length, 3, "blank, unparseable and non-UTF-8 lines are never POSTed");
+    assert.ok(readFileSync(file).equals(kept));
+    assert.ok(r.stdout.includes(`delivered 1 of 5 runs from ${file}`));
+    assert.ok(
+      r.stdout.includes(
+        `; 1 accepted line removed from ${file} — the 5 lines left are now numbered from 1, ` +
+          `so the numbers above no longer address them`,
+      ),
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: says the reported numbers are pre-drain when the drain leaves lines behind", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      outageVerdict,
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+    ],
+  );
+  try {
+    const file = tmpFile("three.jsonl", `${runLine("a")}\n${runLine("b")}\n${runLine("c")}\n`);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    // The undelivered line is still in the file, and the exit code shouts the
+    // one that leaves work undone. The full pin is deliberate: it shows the
+    // very mismatch the clause is about — the report's "line 2" against a
+    // rewritten file whose only line is the undelivered one.
+    assert.equal(r.code, 2);
+    assert.equal(srv.bodies.length, 3);
+    assert.equal(readFileSync(file, "utf8"), `${runLine("b")}\n`);
+    assert.equal(
+      r.stdout,
+      `line 1: accepted — HTTP 202, test_run_id tr_1, ci_run_id a\n` +
+        `line 2: not delivered — HTTP 503 — upstream is down\n` +
+        `line 3: accepted — HTTP 202, test_run_id tr_1, ci_run_id c\n` +
+        `specguard-ingest: delivered 2 of 3 runs from ${file}; 1 could not be delivered; ` +
+        `2 accepted lines removed from ${file} — the 1 line left is now numbered from 1, ` +
+        `so the numbers above no longer address it\n`,
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: stays silent about renumbering when nothing was accepted and when the file was emptied", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [refusalVerdict, { status: 202, body: '{"test_run_id":"tr_1"}' }],
+  );
+  try {
+    const refusedOnly = tmpFile("refused.jsonl", `${runLine("r")}\n`);
+    const r1 = await runCli(["--drain", refusedOnly], srv.url, queueOverrides(refusedOnly));
+    assert.equal(r1.code, 1);
+    assert.ok(r1.stdout.includes(`delivered 0 of 1 run from ${refusedOnly}`));
+    assert.ok(!r1.stdout.includes("accepted line"), "nothing removed, so no drain clause");
+    assert.equal(readFileSync(refusedOnly, "utf8"), `${runLine("r")}\n`, "no rewrite, file untouched");
+    rm(refusedOnly);
+
+    const emptied = tmpFile("emptied.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const r2 = await runCli(["--drain", emptied], srv.url, queueOverrides(emptied));
+    assert.equal(r2.code, 0);
+    assert.ok(r2.stdout.endsWith(`; 2 accepted lines removed from ${emptied}\n`));
+    assert.ok(!r2.stdout.includes("now numbered from 1"), "no line left for the sentence to be about");
+    rm(emptied);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: removes at most the lines --lines named, holding every other one", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("three.jsonl", `${runLine("a")}\n${runLine("b")}\n${runLine("c")}\n`);
+    const r = await runCli(["--drain", "--lines", "2", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 0);
+    assert.deepEqual(
+      srv.bodies.map((b) => /"ci_run_id":"([^"]*)"/.exec(b)?.[1]),
+      ["b"],
+    );
+    assert.equal(readFileSync(file, "utf8"), `${runLine("a")}\n${runLine("c")}\n`);
+    assert.ok(
+      r.stdout.includes(
+        `; 1 accepted line removed from ${file} — the 2 lines left are now numbered from 1, ` +
+          `so the numbers above no longer address them`,
+      ),
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: removes the accepted suffix under --from-line, keeping the skipped prefix", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      refusalVerdict,
+    ],
+  );
+  try {
+    const file = tmpFile("three.jsonl", `${runLine("a")}\n${runLine("b")}\n${runLine("c")}\n`);
+    const r = await runCli(["--drain", "--from-line", "2", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 1);
+    assert.deepEqual(
+      srv.bodies.map((b) => /"ci_run_id":"([^"]*)"/.exec(b)?.[1]),
+      ["b", "c"],
+    );
+    assert.equal(readFileSync(file, "utf8"), `${runLine("a")}\n${runLine("c")}\n`);
+    assert.ok(
+      r.stdout.includes(
+        `; 1 accepted line removed from ${file} — the 2 lines left are now numbered from 1, ` +
+          `so the numbers above no longer address them`,
+      ),
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: carries a line appended while the deliveries ran into the rewrite", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const appended = `${runLine("appended")}\n`;
+    // The reporter appends to the queue with no lock; driven from the delivery
+    // seam, this lands after the first POST — `readSource` is behind it, the
+    // rewrite is ahead of it: the window the tail-carry exists for. Dropping
+    // the tail-carry fails this example, and so does a naive
+    // `writeFile(path, kept)`: both throw the appended line away.
+    const realFetch = globalThis.fetch;
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const res = await realFetch(input, init);
+      posts += 1;
+      if (posts === 1) appendFileSync(file, appended);
+      return res;
+    };
+    const o = out();
+    const e = out();
+    const code = await run(["--drain", file], o.stream, e.stream, {
+      env: envFor(srv.url, queueOverrides(file)),
+      fetchImpl,
+    });
+    assert.equal(code, 0);
+    assert.equal(srv.bodies.length, 2, "the appended line is carried, never delivered");
+    assert.equal(readFileSync(file, "utf8"), appended);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: refuses to combine with --list, leaving the file untouched", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+  try {
+    const before = readFileSync(file);
+    const r = await runCli(["--drain", "--list", file]);
+    assert.equal(r.code, 2);
+    assert.equal(
+      r.stderr,
+      "specguard-ingest: error: --drain delivers and removes the lines that were accepted; " +
+        "--list delivers nothing, so there is nothing for it to drain\n",
+    );
+    assert.ok(readFileSync(file).equals(before), "a refusal that moved the file would not be a refusal");
+    rm(file);
+  } finally {
+    // nothing to close
+  }
+});
+
+test("SPGD-1462: --drain takes no value — the attached form is an invalid option, like --list and --json", async () => {
+  const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+  try {
+    const r = await runCli(["--drain=1", file]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /invalid option: --drain=1/);
+    rm(file);
+  } finally {
+    // nothing to close
+  }
+});
+
+test("SPGD-1462: refuses to drain a path that is not the configured replay queue", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+    const before = readFileSync(file);
+    // No SPECGUARD_OUTPUT_PATH: the temp file is not the configured queue,
+    // which is exactly the situation the guard exists for. Nothing is
+    // delivered either — the refusal fires before the transport does.
+    const r = await runCli(["--drain", file], srv.url);
+    assert.equal(r.code, 2);
+    assert.equal(srv.bodies.length, 0);
+    assert.ok(r.stderr.includes(`--drain empties the replay queue, and ${file} is not it`));
+    assert.ok(r.stderr.includes("(configured as log/test_results.jsonl)"));
+    assert.ok(r.stderr.includes("the local record is a development record, not a queue"));
+    assert.ok(readFileSync(file).equals(before));
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: drains a file spelled exactly as SPECGUARD_OUTPUT_PATH configures the queue", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 0);
+    assert.equal(srv.bodies.length, 1);
+    assert.equal(readFileSync(file).length, 0);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: swaps the rewrite in through a same-directory rename, original intact until the swap", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const original = readFileSync(file);
+    const observed: Record<string, boolean> = {};
+    const realRename = rename;
+    const drainFs: DrainFs = realDrainFs({
+      rename: async (from, to) => {
+        const fromPath = from.toString();
+        const toPath = to.toString();
+        observed.sameDir = dirname(fromPath) === dirname(toPath);
+        observed.distinctName = basename(fromPath) !== basename(toPath);
+        observed.originalIntact = readFileSync(toPath).equals(original);
+        await realRename(from, to);
+      },
+    });
+    const o = out();
+    const e = out();
+    const code = await run(["--drain", file], o.stream, e.stream, {
+      env: envFor(srv.url, queueOverrides(file)),
+      drainFs,
+    });
+    assert.equal(code, 0);
+    // An in-place `writeFile(path, kept)` never calls rename, so it fails here
+    // — and at the failure-injection example below.
+    assert.deepEqual(observed, { sameDir: true, distinctName: true, originalIntact: true });
+    assert.equal(readFileSync(file).length, 0);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: leaves the file byte-identical and exits 2 when the rename fails", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const original = readFileSync(file);
+    const drainFs: DrainFs = realDrainFs({
+      rename: async () => {
+        throw Object.assign(new Error("input/output error"), { code: "EIO" });
+      },
+    });
+    const o = out();
+    const e = out();
+    const code = await run(["--drain", file], o.stream, e.stream, {
+      env: envFor(srv.url, queueOverrides(file)),
+      drainFs,
+    });
+    // A failure mid-drain leaves the original intact — the whole point of the
+    // temp file — leaves no stray temporary behind, and is stated, never
+    // silent: the deliveries are still reported in full, the warning names the
+    // file, and the run exits 2, because a 0 would read as "drained" about a
+    // queue that was not.
+    assert.equal(code, 2);
+    assert.ok(readFileSync(file).equals(original));
+    assert.deepEqual(readdirSync(dirname(file)), [basename(file)]);
+    assert.ok(e.text().includes(`could not remove the accepted lines from ${file}`));
+    assert.ok(e.text().includes("the file is left as it was"));
+    assert.ok(o.text().includes("line 1: accepted"));
+    assert.ok(!o.text().includes("accepted lines removed"));
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: keeps the queue file's mode through the atomic swap", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      refusalVerdict,
+      outageVerdict,
+    ],
+  );
+  try {
+    // 0o640 rather than 0o600 so the example cannot pass by accident: 0600 is
+    // exactly the default under umask 077, where this would pass without the fix.
+    const file = tmpFile("mixed.jsonl", `${runLine("ok")}\n${runLine("refused")}\n${runLine("down")}\n`);
+    chmodSync(file, 0o640);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 2);
+    assert.equal(statSync(file).mode & 0o7777, 0o640, "the rewrite must not reset the file's mode");
+    assert.equal(readFileSync(file, "utf8"), `${runLine("refused")}\n${runLine("down")}\n`);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: rewrites a symlinked queue's target, leaving the link itself in place", async () => {
+  const srv = await captureServer(
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    [
+      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      refusalVerdict,
+      outageVerdict,
+    ],
+  );
+  try {
+    // `rename(2)` replaces the directory entry at the path it is given, so on
+    // a queue reached through a symlink the naive swap would replace the link
+    // itself with a regular file — and leave the real target holding every
+    // line just accepted, which the next drain would then send again.
+    const dir = mkdtempSync(join(tmpdir(), "specguard-ingest-link-"));
+    const target = join(dir, "target.jsonl");
+    const link = join(dir, "queue-link.jsonl");
+    writeFileSync(target, `${runLine("ok")}\n${runLine("refused")}\n${runLine("down")}\n`);
+    symlinkSync(target, link);
+
+    const r = await runCli(["--drain", link], srv.url, queueOverrides(link));
+    assert.equal(r.code, 2);
+    assert.equal(lstatSync(link).isSymbolicLink(), true);
+    assert.equal(readlinkSync(link), target);
+    assert.equal(readFileSync(target, "utf8"), `${runLine("refused")}\n${runLine("down")}\n`);
+    rmSync(dir, { recursive: true, force: true });
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: states the removal in the --json summary, and only under the flag", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const drained = await runCli(["--json", "--drain", file], srv.url, queueOverrides(file));
+    assert.equal(drained.code, 0);
+    assert.equal(JSON.parse(drained.stdout).summary.drained, 2);
+    assert.equal(readFileSync(file).length, 0);
+
+    writeFileSync(file, `${runLine("a")}\n${runLine("b")}\n`);
+    const plain = await runCli(["--json", file], srv.url, queueOverrides(file));
+    assert.equal(plain.code, 0);
+    assert.equal("drained" in JSON.parse(plain.stdout).summary, false, "absent without the flag");
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: names the removal in the summary line, and only when the flag asked for it", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
+    const drained = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(drained.code, 0);
+    assert.ok(
+      drained.stdout.includes(`delivered 2 of 2 runs from ${file}; 2 accepted lines removed from ${file}`),
+    );
+
+    // The whole default non-interference pin: same fixture, no flag, and the
+    // stdout is the pre-drain bytes exactly and the file does not move.
+    writeFileSync(file, `${runLine("a")}\n${runLine("b")}\n`);
+    const before = readFileSync(file);
+    const plain = await runCli([file], srv.url, queueOverrides(file));
+    assert.equal(plain.code, 0);
+    assert.equal(
+      plain.stdout,
+      `line 1: accepted — HTTP 202, test_run_id tr_1, ci_run_id a\n` +
+        `line 2: accepted — HTTP 202, test_run_id tr_1, ci_run_id b\n` +
+        `specguard-ingest: delivered 2 of 2 runs from ${file}\n`,
+    );
+    assert.ok(readFileSync(file).equals(before));
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: documents --drain in the help, beside the selectors it composes with", async () => {
+  const r = await runCli(["--help"]);
+  assert.equal(r.code, 0);
+  const screen = r.stdout.replace(/\s+/g, " ");
+  assert.ok(screen.includes("--drain is the follow-through, and it is opt-in"));
+  assert.ok(
+    screen.includes(
+      "refused, undelivered, unparseable and blank lines, and every line --from-line or --lines held back",
+    ),
+  );
+  assert.ok(screen.includes("a rewrite that could not complete is a 2 as well — the file is left as it was"));
+  assert.ok(screen.includes("After delivering, remove from <file> exactly the lines this run accepted"));
+  assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file> \[--drain\]/);
+});
+
+test("SPGD-1462: keeps the numbering guarantee scoped in the README and the help", async () => {
+  // The renumbering guarantee has to stay SCOPED. The README once said "the
+  // numbering never shifts" with no qualifier — false the day --drain landed,
+  // since its rewrite packs the surviving lines up from the top and a report
+  // whose numbers the next command cannot use is exactly the failure a
+  // per-line report exists to prevent. The compiled test runs from
+  // .test-build/test/, so the package root is two levels up.
+  const readme = readFileSync(join(here, "..", "..", "README.md"), "utf8");  assert.ok(
+    !readme.includes("the numbering never shifts:"),
+    "the unconditional never-shifts claim is back in README.md — it is false on the --drain path, " +
+      "whose rewrite renumbers the surviving lines",
+  );
+  assert.ok(
+    readme.includes("the numbering never shifts between invocations that do not drain"),
+    "the scoped never-shifts claim is gone from README.md",
+  );
+  assert.ok(readme.includes("The removal renumbers what it leaves"));
+  assert.ok(
+    readme.replace(/\s+/g, " ").includes("re-run `--list` to see the renumbered file, or run `--drain` again"),
+    "the README's resume guidance for a drained queue is gone",
+  );
+  assert.ok(readme.includes("each `lines[].number` refers to the file **before** the drain"));
+
+  const help = await runCli(["--help"]);
+  const screen = help.stdout.replace(/\s+/g, " ");
+  assert.ok(screen.includes("Removing lines renumbers what is left"));
+  assert.ok(screen.includes("describe <file> as it was read, not as the next run finds it"));
+  assert.ok(screen.includes("resume by re-running --list (or --drain) rather than reusing those numbers"));
 });
