@@ -186,6 +186,82 @@ test("CI_COMMIT_REF_NAME resolves before CI_COMMIT_BRANCH", () => {
   assert.equal(e.branch, "feature/mr");
 });
 
+test("each provider commit variable resolves through readRunnerEnv", () => {
+  // The full commit list this client reads, pinned per provider the way the
+  // branch list above is: one failing assertion per lost member, its
+  // message naming the key, instead of a moved count. The documented
+  // first-wins precedence is asserted at the bottom, mirroring the Ruby
+  // twin's configuration_spec. PATH points nowhere so the
+  // `git rev-parse HEAD` fallback is unreachable — the suite runs inside a
+  // real checkout, and a deleted member would otherwise be masked by the
+  // real HEAD sha of that checkout.
+  for (const [name, value] of [
+    ["SPECGUARD_COMMIT_SHA", "abc-local"],
+    ["GITHUB_SHA", "abc-github"],
+    ["CI_COMMIT_SHA", "abc-gitlab"],
+    ["CIRCLE_SHA1", "abc-circleci"],
+    ["BUILDKITE_COMMIT", "abc-buildkite"],
+    ["GIT_COMMIT", "abc-jenkins"],
+  ] as const) {
+    const e = readRunnerEnv({
+      env: envWith({ PATH: "/nonexistent", [name]: value }),
+    });
+    assert.equal(e.commitSha, value, `${name} must resolve for commitSha`);
+  }
+
+  const precedence = readRunnerEnv({
+    env: envWith({
+      PATH: "/nonexistent",
+      GITHUB_SHA: "abc-github",
+      CI_COMMIT_SHA: "abc-gitlab",
+      CIRCLE_SHA1: "abc-circleci",
+    }),
+  });
+  assert.equal(
+    precedence.commitSha,
+    "abc-github",
+    "GITHUB_SHA must resolve before CI_COMMIT_SHA and CIRCLE_SHA1 for commitSha",
+  );
+});
+
+test("each provider run-id variable resolves through readRunnerEnv", () => {
+  // The full ci_run_id list, pinned per provider like the branch and commit
+  // lists: losing CIRCLE_WORKFLOW_ID, BUILDKITE_BUILD_ID, BUILD_TAG or
+  // CI_PIPELINE_ID splits a sharded suite on that provider into N TestRuns
+  // with split denominators — the failure README's "If you shard your
+  // suite" section exists to prevent.
+  for (const [name, value] of [
+    ["SPECGUARD_RUN_ID", "run-local"],
+    ["GITHUB_RUN_ID", "17442"],
+    ["CI_PIPELINE_ID", "881001"],
+    ["CIRCLE_WORKFLOW_ID", "4f2a9c"],
+    ["BUILDKITE_BUILD_ID", "01893c11"],
+    ["BUILD_TAG", "jenkins-77"],
+  ] as const) {
+    const e = readRunnerEnv({
+      env: envWith({ SPECGUARD_COMMIT_SHA: "abc", [name]: value }),
+    });
+    assert.equal(e.ciRunId, value, `${name} must resolve for ciRunId`);
+  }
+});
+
+test("each provider shard variable resolves through readRunnerEnv", () => {
+  // The full shard list, pinned per provider: losing CIRCLE_NODE_INDEX or
+  // BUILDKITE_PARALLEL_JOB silently merges that provider's shards into one
+  // denominator instead of letting each shard replace its own number.
+  for (const [name, value] of [
+    ["SPECGUARD_SHARD_ID", "3"],
+    ["CI_NODE_INDEX", "0"],
+    ["CIRCLE_NODE_INDEX", "1"],
+    ["BUILDKITE_PARALLEL_JOB", "2"],
+  ] as const) {
+    const e = readRunnerEnv({
+      env: envWith({ SPECGUARD_COMMIT_SHA: "abc", [name]: value }),
+    });
+    assert.equal(e.shardId, value, `${name} must resolve for shardId`);
+  }
+});
+
 test("SPECGUARD_TIMEOUT is seconds; default is 10s; garbage falls back to 10s", () => {
   assert.equal(
     readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_TIMEOUT: "2" }) }).timeoutMs,
