@@ -192,6 +192,90 @@ test("usage: a missing file and a directory are named differently, both 2s", asy
 });
 
 // ---------------------------------------------------------------------------
+// SPGD-1442: the refusal is the one moment a keyless developer can be told
+// where their run actually went — the help points them at the replay queue
+// while their keyless run wrote the local record beside it. The clause is
+// guarded on the conjunction — the missing path IS the configured replay
+// queue AND the configured local record EXISTS — so an ordinary typo, or a
+// missing pair, keeps the plain message byte-for-byte. Every path here is an
+// override (SPECGUARD_OUTPUT_PATH / SPECGUARD_LOCAL_OUTPUT_PATH): the clause
+// must key on the CONFIGURED pair, never on a hard-coded default, and
+// absolute tmp paths keep these pins cwd-independent.
+
+/** A scratch dir with an overridden sink pair; the local record is written only on demand. */
+function sinkDir(withLocal: boolean): { dir: string; queue: string; local: string } {
+  const dir = mkdtempSync(join(tmpdir(), "specguard-ingest-sinks-"));
+  const queue = join(dir, "queue.jsonl");
+  const local = join(dir, "local.jsonl");
+  if (withLocal) writeFileSync(local, `${runLine("17")}\n`);
+  return { dir, queue, local };
+}
+
+function sinkOverrides(queue: string, local: string): Record<string, string> {
+  return { SPECGUARD_OUTPUT_PATH: queue, SPECGUARD_LOCAL_OUTPUT_PATH: local };
+}
+
+test("SPGD-1442: a missing replay queue with a local record present names the record in the refusal", async () => {
+  const { dir, queue, local } = sinkDir(true);
+  try {
+    const r = await runCli([queue], "http://127.0.0.1:1", sinkOverrides(queue, local));
+    assert.equal(r.code, 2);
+    assert.equal(
+      r.stderr,
+      `specguard-ingest: error: no such file: ${queue} — the replay queue was never ` +
+        `written, but the local record ${local} does exist (what the reporters write ` +
+        `when no API key is configured)\n`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The same clause through the arm that exists for exactly this developer: a
+// keyless --list, where no credentials are configured and no transport is built.
+test("SPGD-1442: the keyless --list arm names the local record too", async () => {
+  const { dir, queue, local } = sinkDir(true);
+  try {
+    const r = await runCli(["--list", queue], null, sinkOverrides(queue, local));
+    assert.equal(r.code, 2);
+    assert.ok(
+      r.stderr.includes(`the local record ${local} does exist`),
+      `stderr should name the local record, got: ${r.stderr}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Byte-for-byte guard: the clause needs BOTH terms. No local record on disk →
+// the plain message, untouched.
+test("SPGD-1442: a missing configured queue with no local record keeps the plain message byte-for-byte", async () => {
+  const { dir, queue, local } = sinkDir(false);
+  try {
+    const r = await runCli([queue], "http://127.0.0.1:1", sinkOverrides(queue, local));
+    assert.equal(r.code, 2);
+    assert.equal(r.stderr, `specguard-ingest: error: no such file: ${queue}\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The equality term, pinned on its own: a local record merely existing is not
+// enough — the missing path must BE the configured queue, or every typo would
+// be redirected at whichever file happens to be configured.
+test("SPGD-1442: a missing path that is not the configured queue keeps the plain message even with a local record present", async () => {
+  const { dir, queue, local } = sinkDir(true);
+  const gone = join(dir, "gone.jsonl");
+  try {
+    const r = await runCli([gone], "http://127.0.0.1:1", sinkOverrides(queue, local));
+    assert.equal(r.code, 2);
+    assert.equal(r.stderr, `specguard-ingest: error: no such file: ${gone}\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // --list: the check-the-file-first instrument
 
 test("--list needs no credentials: it rows the file, delivers nothing, exits 0", async () => {
@@ -1120,6 +1204,21 @@ test("--help prints usage and exits 0", async () => {
   assert.match(r.stdout, /Usage: specguard-ingest \[--list\] \[--from-line N \| --lines SPEC\] <file>/);
   assert.match(r.stdout, /Exit codes:/);
   assert.match(r.stdout, /0  every line was accepted/);
+});
+
+// NEGATIVE-FIRST for SPGD-1442: the clauses this example asserts did not exist
+// before the fix — measured at f74c6a8, `test_results.local` had zero hits in
+// the help text, so every assertion here fails on the pre-fix text while every
+// existing help pin already passes there. The fourth assertion is a guard, not
+// a new clause: the EVERY-line hazard must survive the rewrite in full.
+test("SPGD-1442: --help names both sinks — the replay queue and the keyless local development record", async () => {
+  const r = await runCli(["--help"]);
+  assert.equal(r.code, 0);
+  const screen = r.stdout.replace(/\s+/g, " ");
+  assert.match(screen, /the replay queue, log\/test_results\.jsonl/);
+  assert.match(screen, /the local development record, log\/test_results\.local\.jsonl/);
+  assert.match(screen, /when no API key is configured/);
+  assert.match(screen, /EVERY line in <file> is delivered/);
 });
 
 // ---------------------------------------------------------------------------
