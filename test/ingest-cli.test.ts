@@ -2049,6 +2049,95 @@ test("SPGD-1462: carries a line appended while the deliveries ran into the rewri
   }
 });
 
+// SPGD-1511: every fixture above ends in `\n`, so the branches that handle a
+// final line the file ends WITHOUT — `keptBytes`' `isLast` arm and
+// `countLines`' trailing segment — ran in no example. A reporter appends to
+// the queue with no lock, so `readSource` can see the file mid-append and a
+// torn, unterminated final line is exactly what a mid-append reporter leaves
+// behind. The three tests below feed `--drain` that shape.
+
+test("SPGD-1462: keeps a last line the file ends without byte for byte, and its count drives the renumbering sentence", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    outageVerdict,
+  ]);
+  try {
+    // No trailing `\n`: the whole point. The accepted line goes, the kept
+    // last line comes back with no newline ADDED to it, and the sentence
+    // counts the survivor — a count that misses a trailing line the file
+    // ended without reads 0 and drops the sentence entirely.
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}`);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 2);
+    assert.equal(srv.bodies.length, 2);
+    assert.equal(readFileSync(file, "utf8"), runLine("b"), "no newline added to the kept unterminated line");
+    assert.ok(
+      r.stdout.includes(
+        `; 1 accepted line removed from ${file} — the 1 line left is now numbered from 1, ` +
+          `so the numbers above no longer address it`,
+      ),
+    );
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: rejoins a line the read caught mid-append, because the kept half ends without a newline", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  try {
+    // The unterminated-read case of the tail-carry — "carries a line appended
+    // while the deliveries ran into the rewrite" above covers a TERMINATED
+    // read. `readSource` can see the file mid-append: a torn final line with
+    // no `\n`. The rewrite rejoins it whole only because the kept half ends
+    // without one — a newline added to the kept half, or the half dropped,
+    // corrupts the run the reporter was mid-way through writing.
+    const full = runLine("b");
+    const at = Math.floor(full.length / 2);
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${full.slice(0, at)}`);
+    const rest = `${full.slice(at)}\n`;
+    const realFetch = globalThis.fetch;
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const res = await realFetch(input, init);
+      posts += 1;
+      if (posts === 1) appendFileSync(file, rest);
+      return res;
+    };
+    const o = out();
+    const e = out();
+    await run(["--drain", file], o.stream, e.stream, {
+      env: envFor(srv.url, queueOverrides(file)),
+      fetchImpl,
+    });
+    assert.equal(srv.bodies.length, 1, "the torn half is unparseable and is never sent");
+    assert.equal(readFileSync(file, "utf8"), `${full}\n`, "the whole line, rejoined");
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("SPGD-1462: removing an unterminated last line leaves the line before it with its newline", async () => {
+  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
+    outageVerdict,
+    { status: 202, body: '{"test_run_id":"tr_1"}' },
+  ]);
+  try {
+    // The accepted one is the file's unterminated LAST line; the kept one is
+    // the line before it, whose `\n` is the terminator the walk split on.
+    // Removing the last line must not strip it.
+    const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}`);
+    const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
+    assert.equal(r.code, 2);
+    assert.equal(srv.bodies.length, 2);
+    assert.equal(readFileSync(file, "utf8"), `${runLine("a")}\n`);
+    rm(file);
+  } finally {
+    await srv.close();
+  }
+});
+
 test("SPGD-1462: refuses to combine with --list, leaving the file untouched", async () => {
   const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
   try {
