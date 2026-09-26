@@ -237,6 +237,177 @@ test("MALFORMED annotation case: a failing finding is exit 1, the only path to i
   assert.equal(json.summary.malformed, 1);
 });
 
+// --- SPGD-1521: the structural pass — stacked comment-form `@intent` --------
+//
+// A run of ≥2 consecutive comment-form `@intent` lines immediately above an
+// example leaves every line of the run but the LAST dead: the one-line
+// lookback (SPGD-12 §2) claims only the line directly above the example.
+// These findings are client-produced (unreachable.ts), appended to the
+// binary's own, so exit 1 and both renderers pick them up with no second
+// path. The Ruby twin's stacked arm (SPGD-900) is the reference; the pins
+// below mirror its acceptance cases.
+
+const STACKED_INTENT_A =
+  '// @intent: {"entity":"Cart","action":"add","behavior":"adds an item to an empty cart","layer":"unit"}';
+const STACKED_INTENT_B =
+  '// @intent: {"entity":"Cart","action":"add","behavior":"increments quantity for a duplicate item","layer":"unit"}';
+const STACKED_INTENT_C =
+  '// @intent: {"entity":"Cart","action":"add","behavior":"clears the cart on checkout","layer":"unit"}';
+
+test("stacked comment-form @intent lines above one test exit 1 — the UPPER line is unreachable", () => {
+  const f = makeRepo({
+    "stacked.test.js": [
+      'import { test, describe } from "node:test";',
+      "",
+      STACKED_INTENT_A,
+      STACKED_INTENT_B,
+      'test("adds", () => {});',
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [
+      { file: "stacked.test.js", line: 3, kind: null, ok: true, errors: [] },
+      { file: "stacked.test.js", line: 4, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const report = inRepo(f, ["stacked.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.ok(!report.ok);
+  // Exactly ONE finding: the LAST line of the run is the one the lookback
+  // claims, so only the upper line is dead.
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.equal(unreachable.length, 1);
+  assert.equal(unreachable[0]?.file, "stacked.test.js");
+  assert.equal(unreachable[0]?.line, 3);
+  assert.equal(unreachable[0]?.ok, false);
+  assert.equal(unreachable[0]?.aboutFile, false);
+  assert.ok(unreachable[0]?.errors[0]?.includes("one-line lookback"));
+  // The human report names the dead line; `--json` carries the finding shape.
+  const human = renderHuman(report);
+  assert.match(human, /FAIL stacked\.test\.js:3 \(unreachable\)/);
+  const json = JSON.parse(renderJson(report)) as {
+    ok: boolean;
+    findings: { file: string; line: number; kind: string; ok: boolean; errors: string[] }[];
+  };
+  assert.equal(json.ok, false);
+  assert.deepEqual(
+    json.findings.filter((x) => x.kind === "unreachable"),
+    [
+      {
+        file: "stacked.test.js",
+        line: 3,
+        kind: "unreachable",
+        ok: false,
+        errors: unreachable[0]!.errors,
+      },
+    ],
+  );
+});
+
+test("an unreachable finding counts in malformed but never inflates summary.annotations", () => {
+  // Same fixture as above: the binary still saw and validated TWO
+  // annotations (stacking discards one at EXTRACTION, not at validation),
+  // so `annotations` stays the binary's count. The client-produced finding
+  // rides `malformed` — it is the exit-1 driver — without being counted a
+  // second time as an annotation.
+  const f = makeRepo({
+    "stacked.test.js": [STACKED_INTENT_A, STACKED_INTENT_B, 'test("adds", () => {});'].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [
+      { file: "stacked.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "stacked.test.js", line: 2, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const report = inRepo(f, ["stacked.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.equal(report.summary.annotations, 2);
+  assert.equal(report.summary.malformed, 1);
+  const human = renderHuman(report);
+  assert.match(human, /specguard lint: 2 annotations, 1 malformed/);
+});
+
+test("consecutive comment-form @intent lines with NO example directly below are not unreachable", () => {
+  // The run's anchor is the example: a blank line or a plain statement after
+  // the run means no lookback ever claimed (or lost) anything, so there is
+  // nothing to report — the same anchoring that keeps the Ruby pass off
+  // annotation corpora with no examples at all.
+  const f = makeRepo({
+    "before-blank.test.js": [STACKED_INTENT_A, STACKED_INTENT_B, "", "const x = 1;"].join("\n") + "\n",
+    "before-const.test.js": [STACKED_INTENT_A, STACKED_INTENT_B, "const x = 1;"].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [
+      { file: "before-blank.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "before-blank.test.js", line: 2, kind: null, ok: true, errors: [] },
+      { file: "before-const.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "before-const.test.js", line: 2, kind: null, ok: true, errors: [] },
+    ],
+    4,
+  );
+  const report = inRepo(f, ["before-blank.test.js", "before-const.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.ok(report.ok);
+  assert.equal(report.summary.malformed, 0);
+  assert.equal(report.findings.filter((x) => x.kind === "unreachable").length, 0);
+});
+
+test("a 3-line stacked run flags the first TWO lines only — the claimed last line stays unflagged", () => {
+  const f = makeRepo({
+    "triple.test.js": [
+      STACKED_INTENT_A,
+      STACKED_INTENT_B,
+      STACKED_INTENT_C,
+      'test("adds", () => {});',
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [
+      { file: "triple.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "triple.test.js", line: 2, kind: null, ok: true, errors: [] },
+      { file: "triple.test.js", line: 3, kind: null, ok: true, errors: [] },
+    ],
+    3,
+  );
+  const report = inRepo(f, ["triple.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.deepEqual(
+    unreachable.map((x) => x.line),
+    [1, 2],
+  );
+});
+
+test("the structural pass contributes nothing for a file it cannot scan (oversize), and the run stays exit 0", () => {
+  // The file opens with a stacked pair the pass WOULD flag if it read the
+  // text; the byte budget (the same SCAN_MAX_BYTES scanTokens applies) means
+  // the pass contributes nothing instead. Exit 2 is the oversize file's own
+  // arm and is not this pin's subject — with a working binary that ratifies
+  // oversize files normally, nothing here may borrow exit 1.
+  const f = makeRepo({});
+  fs.writeFileSync(
+    path.join(f.root, "big-stacked.test.js"),
+    Buffer.concat([
+      Buffer.from(STACKED_INTENT_A + "\n" + STACKED_INTENT_B + "\n" + 'test("adds", () => {});\n'),
+      Buffer.alloc(SCAN_MAX_BYTES + 1, "x"),
+    ]),
+  );
+  const binary = stubBackend(
+    [
+      { file: "big-stacked.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "big-stacked.test.js", line: 2, kind: null, ok: true, errors: [] },
+    ],
+    2,
+  );
+  const report = inRepo(f, ["big-stacked.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.ok(report.ok);
+  assert.equal(report.findings.filter((x) => x.kind === "unreachable").length, 0);
+  assert.equal(report.summary.malformed, 0);
+});
+
 test("annotation-free repo with NO binary still exits 0 — empty is not failure", () => {
   const f = makeRepo({ "a.test.ts": "it('x', () => {});" });
   const report = inRepo(f, [], undefined);

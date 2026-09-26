@@ -824,7 +824,7 @@ that have nothing to check:
 | Exit | Meaning |
 |---|---|
 | 0 | every annotation checked was valid — including "there were none" (a repo with zero annotations and no binary is still 0) |
-| 1 | at least one annotation is malformed |
+| 1 | at least one annotation is malformed, or well-formed but unreachable — stacked above another comment-form `@intent:` line, so the one-line lookback only ever claims the line directly above the test and the rest of the stack is dead metadata |
 | 2 | the linter could not do its job — misuse, a broken override, an unresolvable binary when annotations exist, unreadable files, or a backend failure |
 
 An exit-2 run writes its reason to stderr and emits **no report document** — "could not check" is

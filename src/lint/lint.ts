@@ -13,6 +13,7 @@ import {
 } from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { provenanceLine } from "./report.js";
+import { unreachableFindings } from "./unreachable.js";
 
 /**
  * `specguard lint` orchestration: discovery → binary validation → verdict.
@@ -24,8 +25,11 @@ import { provenanceLine } from "./report.js";
  *      An annotation-free repository is exit 0 even with no binary resolved:
  *      "empty ≠ failure", and exit 2 is reserved for a run that had
  *      something to check and could not;
- *   1  at least one annotation is malformed. The ONLY code produced by
- *      inspecting content, reached in exactly one place below;
+ *   1  at least one annotation is malformed — or well-formed but
+ *      unreachable (stacked above another comment-form `@intent` line,
+ *      so the one-line lookback never claims it; the structural pass,
+ *      unreachable.ts). The ONLY code produced by inspecting content,
+ *      reached in exactly one place below;
  *   2  the linter could not do its job — misuse, an unresolvable/broken
  *      binary when annotations DID exist to validate, or a backend failure.
  *      Exit 1 is produced in exactly one place so it means that and nothing
@@ -356,10 +360,29 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   }
 
   const findings: LintFinding[] = raw.map((f) => ({ ...f, aboutFile: aboutFile(f.kind) }));
+  // SPGD-1521: the structural pass — well-formed annotations that can never
+  // be extracted. A run of ≥2 consecutive comment-form `@intent` lines
+  // immediately above an example leaves every line of the run but the LAST
+  // dead: the one-line lookback (SPGD-12 §2) claims only the line directly
+  // above the example. These become findings like any other, appended here —
+  // before `malformed` is computed and before the `unreadable` exit-2 return
+  // — so the exit code, both renderers and the unread arm all see them with
+  // no second path to keep in step (the Ruby CLI's `results +=
+  // unreachable_results(selection.files)`). They are client-produced, so
+  // they bypass backend.ts's FAILURE_KINDS guard by construction; they never
+  // collide with a binary kind because that guard already refused any kind
+  // outside the binary's vocabulary.
+  for (const finding of unreachableFindings(selection.files)) findings.push(finding);
   const malformed = findings.filter((f) => !f.aboutFile && !f.ok).length;
   const unreadFindings = findings.filter((f) => f.aboutFile && !f.ok);
   const unreadable = unreadFindings.length;
-  const annotations = findings.filter((f) => !f.aboutFile).length;
+  // `annotations` stays the BINARY's annotation count: an unreachable
+  // finding is an annotation site the extraction discarded, not one the
+  // binary validated, so counting it here would inflate the total above what
+  // the backend reported. The coverage-note `annotated` set below is
+  // unaffected — a stacked file always also carries the line the lookback
+  // DID claim, so the file is already in the annotated set either way.
+  const annotations = findings.filter((f) => !f.aboutFile && f.kind !== "unreachable").length;
 
   // SPGD-1161: which of the checked files were read and yielded no `@intent`
   // annotation at all. Zero findings (or an empty `findings` list in the
