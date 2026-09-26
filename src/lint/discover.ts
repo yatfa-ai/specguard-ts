@@ -510,7 +510,8 @@ function untrackedLegNames(root: string): string[] {
  * repository whose `.gitignore` does not yet cover `node_modules` hands the
  * untracked leg hundreds of thousands of entries. A crash there would die in
  * selection, before the validator ran, and exit non-zero on empty output,
- * which the exit contract reads as malformed annotations. `concat` iterates
+ * which the exit contract reads as malformed (or unreachable) annotations.
+ * `concat` iterates
  * instead of putting the leg on the call stack, so the union holds at any
  * leg length. */
 export function changedNameUnion(

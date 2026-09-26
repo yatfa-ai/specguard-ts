@@ -10,7 +10,7 @@
  * discovered by walking the current directory; `--changed` instead selects
  * them from the git diff against the merge base with the default branch (or
  * an explicit `<base>`). Exit codes: 0 clean (including zero annotations),
- * 1 malformed annotations, 2 could not do its job.
+ * 1 malformed or unreachable annotations, 2 could not do its job.
  *
  * `-v`/`--version` — bare or after `lint` — prints `specguard-ts <version>`
  * (one line, exit 0) before any discovery or scan.
@@ -109,7 +109,7 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
         "                      skips the fixed dependency/build directories\n" +
         "                      (node_modules, .git, dist, .test-build, coverage).\n",
     );
-    stdout.write("\nExit codes: 0 clean (including zero annotations), 1 malformed annotations, 2 could not lint.\n");
+    stdout.write("\nExit codes: 0 clean (including zero annotations), 1 malformed or unreachable annotations, 2 could not lint.\n");
     return 0;
   }
 
@@ -130,7 +130,8 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
     // The boundary of the exit contract: lint() deliberately re-throws
     // anything that is not a typed verdict, and an uncaught throw here would
     // die as Node's uncaught-exception default — exit 1, which the contract
-    // defines as "malformed annotations". A crashed run must never wear that
+    // defines as "malformed or unreachable annotations". A crashed run must
+    // never wear that
     // verdict (the SPGD-1121 crash escaped exactly this way), so the
     // boundary catches it: one stderr line, exit 2, no document.
     const message = error instanceof Error ? error.message : String(error);
