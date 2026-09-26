@@ -526,12 +526,12 @@ test("a bare @intent: token inside a description string is prose, NOT an annotat
 });
 
 test("payload prose CANNOT exempt a group line — the exemption reads code before the token only", () => {
-  // The payload ("… when it( is given …") carries a literal `it(`, but the
-  // exemption is matched against line.split("@intent:")[0] only, so it can
-  // never exempt the line this pass exists to flag.
+  // The payload carries a REAL example call behind a `;` opener — reading
+  // the WHOLE line, `; test( again` matches EXAMPLE_ON_LINE and would
+  // exempt the line; the split on the token is what keeps it flagged.
   const f = makeRepo({
     "payload.test.js": [
-      'describe("Cart", () => { // @intent: {"behavior":"… when it( is given …"}',
+      'describe("Cart", () => { // @intent: {"behavior":"… when it( is given …; test( again"}',
       '  test("adds", () => {});',
       "});",
     ].join("\n") + "\n",

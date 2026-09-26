@@ -125,11 +125,11 @@ const INTENT_WITH_PAYLOAD = /@intent:\s*\{/;
  *
  * Two guards keep prose from reading as an example call. The match runs
  * against the code BEFORE the `@intent:` token — the payload is English an
- * author wrote about a behavior ("...when it( is given one"), and reading
- * the `it(` inside a payload exempted the exact group-line shape this pass
- * exists to flag. And the call must sit after a block opener (`{` or `;`),
- * because the description string is part of the code side too. A bare `{`
- * in the opener class already covers an arrow body (`() => {`), so a
+ * author wrote about a behavior ("...when it( is given one"); reading the
+ * payload WHOLE would let prose that carries a call behind an opener
+ * (`"; test( again"`) exempt the shape this pass exists to flag. A call
+ * must sit after a block opener (`{` or `;`) on the code side — the
+ * description string is part of it. A bare `{` covers `() => {`, so a
  * separate `=>\s*\{` alternative would be redundant. What this heuristic
  * still cannot see: a description string containing the literal sequence
  * `{ it(`/`; it(` still reads as a call and is wrongly exempted — a missed
