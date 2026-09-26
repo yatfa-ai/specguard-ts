@@ -753,3 +753,135 @@ test(
     assert.equal(out.rows[0]!.status, "annotated");
   },
 );
+// ---------------------------------------------------------------------------
+// SPGD-1519: the SAME-LINE annotation forms. PROTOCOL.md §1 makes a single
+// comment line immediately above the test — OR ON THE SAME LINE AS IT — the
+// annotation, and the Ruby AnnotationLookup resolves both (`own[line]`
+// first, then the comment-only line above). The pins read a REAL fixture
+// file (fixtures/annotated-same-line.test.js) so the comment-only gate
+// decides from real source text, not from the stub's say-so.
+// ---------------------------------------------------------------------------
+
+const SAME = "fixtures/annotated-same-line.test.js";
+const sameLineText = fs.readFileSync(join(pkgRoot, "fixtures", "annotated-same-line.test.js"), "utf8").split("\n");
+
+/** Same discipline as `lineOf`: real line numbers, never restated integers. */
+function lineOfSameLine(prefix: string): number {
+  const index = sameLineText.findIndex((l) => l.startsWith(prefix));
+  assert.ok(index >= 0, `same-line fixture lost its ${prefix} line`);
+  return index + 1;
+}
+
+const L_ADJ_A = lineOfSameLine('test("adjacent a"');
+const L_ADJ_B = lineOfSameLine('test("adjacent b"');
+const L_LONE = lineOfSameLine('test("lone trailing"');
+const L_OWN_BOTH = lineOfSameLine('test("own above both"');
+const L_OWN_BOTH_COMMENT = lineOfSameLine(
+  '// @intent: {"entity":"Cart","action":"apply promo code","behavior":"the comment above must lose',
+);
+const L_BELOW = lineOfSameLine('test("below claims nothing"');
+
+const INTENT_ADJ_A = {
+  entity: "Cart",
+  action: "apply promo code",
+  behavior: "adjacent first one-liner keeps its own intent",
+  layer: "unit",
+};
+const INTENT_ADJ_B = {
+  entity: "Cart",
+  action: "apply promo code",
+  behavior: "adjacent second one-liner keeps its own intent",
+  layer: "unit",
+};
+const INTENT_LONE = {
+  entity: "Cart",
+  action: "apply promo code",
+  behavior: "lone trailing one-liner ships its own payload",
+  layer: "unit",
+};
+const INTENT_COMMENT_LOSER = {
+  entity: "Cart",
+  action: "apply promo code",
+  behavior: "the comment above must lose to the own line",
+  layer: "unit",
+};
+const INTENT_OWN_WINS = {
+  entity: "Cart",
+  action: "apply promo code",
+  behavior: "own line beats the comment directly above it",
+  layer: "unit",
+};
+
+/** Passing findings for every annotation in the same-line fixture, keyed
+ * exactly as a real binary reports: each annotation's OWN line. */
+function sameLineFindings(): unknown[] {
+  return [
+    { file: SAME, line: L_ADJ_A, kind: null, ok: true, errors: [], intent: INTENT_ADJ_A },
+    { file: SAME, line: L_ADJ_B, kind: null, ok: true, errors: [], intent: INTENT_ADJ_B },
+    { file: SAME, line: L_LONE, kind: null, ok: true, errors: [], intent: INTENT_LONE },
+    { file: SAME, line: L_OWN_BOTH_COMMENT, kind: null, ok: true, errors: [], intent: INTENT_COMMENT_LOSER },
+    { file: SAME, line: L_OWN_BOTH, kind: null, ok: true, errors: [], intent: INTENT_OWN_WINS },
+  ];
+}
+
+test("SPGD-1519: adjacent same-line one-liners each carry their OWN intent — never the other's", () => {
+  const binary = stubBackend(sameLineFindings(), 5);
+  const warnings: string[] = [];
+  const out = annotateRows([row(SAME, L_ADJ_A, "adjacent a"), row(SAME, L_ADJ_B, "adjacent b")], {
+    repoRoot: pkgRoot,
+    env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(warnings, []);
+  assert.equal(out.annotated, 2);
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, INTENT_ADJ_A);
+  assert.equal(out.rows[1]!.status, "annotated");
+  assert.deepEqual(out.rows[1]!.intent, INTENT_ADJ_B);
+  // The wrong-data shape this ticket fixes, stated directly: b must not
+  // carry a's payload even though a's trailing annotation sits on exactly
+  // the line b's one-line lookback points at.
+  assert.notDeepEqual(out.rows[1]!.intent, INTENT_ADJ_A);
+});
+
+test("SPGD-1519: a lone same-line `test(...); // @intent:` row ships annotated with its payload verbatim", () => {
+  const binary = stubBackend(sameLineFindings(), 5);
+  const warnings: string[] = [];
+  const out = annotateRows([row(SAME, L_LONE, "lone trailing")], {
+    repoRoot: pkgRoot,
+    env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(warnings, []);
+  assert.equal(out.annotated, 1);
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, INTENT_LONE);
+});
+
+test("SPGD-1519: an own-line annotation wins over a comment-only annotation directly above it (Ruby Index parity)", () => {
+  const binary = stubBackend(sameLineFindings(), 5);
+  const out = annotateRows([row(SAME, L_OWN_BOTH, "own above both")], {
+    repoRoot: pkgRoot,
+    env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+    warn: () => {},
+  });
+  assert.equal(out.annotated, 1);
+  assert.deepEqual(out.rows[0]!.intent, INTENT_OWN_WINS);
+  assert.notDeepEqual(out.rows[0]!.intent, INTENT_COMMENT_LOSER);
+});
+
+test("SPGD-1519: the line-above fallback never claims a non-comment line — a row under a trailing annotation stays unannotated", () => {
+  // Pre-fix this row shipped ANNOTATED with the test above's intent: the
+  // lookback-only key claimed whatever sat one line up. The gate reads the
+  // fixture's real text — the line above carries code, so it is not a
+  // comment-only line and cannot be inherited.
+  const binary = stubBackend(sameLineFindings(), 5);
+  const out = annotateRows([row(SAME, L_BELOW, "below claims nothing")], {
+    repoRoot: pkgRoot,
+    env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+    warn: () => {},
+  });
+  assert.equal(out.annotated, 0);
+  assert.equal(out.rows[0]!.status, "unannotated");
+  assert.equal(out.rows[0]!.intent, null);
+});
