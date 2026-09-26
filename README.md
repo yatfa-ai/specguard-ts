@@ -13,9 +13,10 @@ deployment configures them identically, and the two clients are distinguishable 
 `User-Agent` (`specguard-ts/<version>`).
 
 **This slice ships the node:test, Vitest, and Jest reporters, the `specguard lint` command, and the `specguard-ingest` replay
-command.** The reporter reads **no
-`@intent:` annotations on the telemetry path**: every run it ships may be a zero-annotation
-run, which is valid by construction and is the platform's primary path.
+command.** The reporter carries `@intent:` annotations on the telemetry path: an annotation the
+`validate-intent` binary ratified and that is attributed to a test ships as `status: "annotated"`
+with the finding's intent object verbatim. A run with zero annotations remains valid by
+construction and is still the platform's primary path.
 
 ---
 
@@ -139,6 +140,20 @@ Five things in the raw event stream would silently corrupt the payload, and the 
 One more, discovered while testing: **a test file that contains zero tests emits one synthetic `test:pass`
 for the file itself** (its name is the absolute file path). It is filtered; a zero-test file ships nothing
 and crashes nothing.
+
+### How an annotation is attributed to a test
+
+Before the POST, the annotation pass resolves each `@intent:` annotation to the test it belongs to. The
+lookup is ordered — the first arm that matches claims the annotation:
+
+1. **The test's own line first** — a trailing `// @intent: …` on the test's call line belongs to that test,
+   whatever sits above it.
+2. **Otherwise a comment-only `// @intent:` line directly above the call line** — the preceding-comment
+   form. A trailing annotation on *another* test's line is never inherited by the row below it.
+
+An annotation the `validate-intent` binary rejects, or one that cannot be attributed to any test, ships
+`status: "unannotated"` and never fails the run. So does a test with no annotation at all — a run with
+zero annotations is valid by construction. Both arms apply to every adapter below.
 
 ## The two sinks, and replaying a saved run — `specguard-ingest`
 
@@ -488,10 +503,11 @@ against a real runner, and only Vitest 4 is installed in this repository's test 
 The mapping decisions, each measured against a real `vitest run` (and pinned by
 `test/integration.vitest.test.ts`):
 
-1. **`location.line` points at the 1-based `test(` call line** — the same anchor `node:test` reports, so
-   the annotation pass's one-line comment lookback (`ANNOTATION_LOOKBACK_LINES`) applies unchanged. The
-   offset was re-measured on Vitest's coordinates rather than inherited: the comment sits exactly one
-   line above `location.line`, pinned by a fixture test.
+1. **`location.line` points at the 1-based `test(` call line** — the same anchor `node:test` reports, so an
+   annotation in the preceding-comment form sits exactly one line above `location.line`. The offset was
+   re-measured on Vitest's coordinates rather than inherited, and is pinned by a fixture test. How an
+   annotation is attributed to a test is stated once in
+   [the reporter section](#how-an-annotation-is-attributed-to-a-test).
 2. **`diagnostic().duration` is milliseconds; the wire field `duration` is seconds** — divided by 1000.
    Skipped tests carry no diagnostic at all and ship `duration: null`.
 3. **`moduleId` is an absolute path** — relativized against the repo root (the process working directory),
@@ -547,9 +563,10 @@ The mapping decisions, each measured against a real `jest` run (and pinned by
 `test/integration.jest.test.ts`):
 
 1. **`location.line` points at the 1-based `it(` call line** — the same anchor `node:test` and Vitest
-   report, so the annotation pass's one-line comment lookback (`ANNOTATION_LOOKBACK_LINES`) applies
-   unchanged. The offset was re-measured on Jest's coordinates rather than inherited: the comment sits
-   exactly one line above `location.line`, pinned by a fixture test.
+   report, so an annotation in the preceding-comment form sits exactly one line above `location.line`
+   here too. The offset was re-measured on Jest's coordinates rather than inherited, and is pinned by a
+   fixture test. How an annotation is attributed to a test is stated once in
+   [the reporter section](#how-an-annotation-is-attributed-to-a-test).
 2. **`fullName` is never read.** Jest composes it by joining ancestry with a *single space*
    (`"outer suite inner suite test"`), a separator no other adapter produces — so the composed name is
    recomposed from `ancestorTitles` + `title` with the `" > "` join the other two adapters emit, and
@@ -682,7 +699,7 @@ them.
 | --- | --- | --- |
 | `file_path` | string | **required**, non-empty; project-relative |
 | `line_number` | integer | **required**, positive — taken from the event's `line`, always present on `node:test` result events |
-| `status` | `"annotated"` \| `"unannotated"` | always `"unannotated"` in this slice |
+| `status` | `"annotated"` \| `"unannotated"` | `"annotated"` when a ratified `@intent:` is attributed to the test, otherwise `"unannotated"` |
 | `intent` | object \| null | **must be null** when unannotated |
 | `name` | string | non-empty; the composed describe/context/it name |
 | `duration` | number \| null | non-negative, **seconds** |
