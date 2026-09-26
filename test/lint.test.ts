@@ -408,6 +408,184 @@ test("the structural pass contributes nothing for a file it cannot scan (oversiz
   assert.equal(report.summary.malformed, 0);
 });
 
+// --- SPGD-1524: the structural pass — group-line `@intent` ------------------
+//
+// An `@intent:` trailing on a describe/suite/context GROUP line is dead in a
+// second way: the line is no example's own and it is not comment-only, so
+// the one-line lookback (SPGD-12 §2) can never claim it and the test beneath
+// ingests as unannotated. These findings are client-produced
+// (unreachable.ts, groupLineFindingsInText), appended by the same producer
+// as the stacked arm, so exit 1 and both renderers pick them up with no
+// second path. The Ruby twin's group arm (SPGD-1510,
+// scanner.rb group_line_findings_in_text) is the reference; the pins below
+// mirror its acceptance cases, one per ticket AC.
+
+const GROUP_INTENT =
+  'describe("Cart", () => { // @intent: {"entity":"Cart","action":"add","behavior":"adds an item to an empty cart","layer":"unit"}';
+
+test("an @intent: trailing on a describe group line exits 1 — the line is unreachable", () => {
+  const f = makeRepo({
+    "group.test.js": [
+      'import { test, describe } from "node:test";',
+      "",
+      GROUP_INTENT,
+      '  test("adds", () => {});',
+      "});",
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [{ file: "group.test.js", line: 3, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, ["group.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.ok(!report.ok);
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.equal(unreachable.length, 1);
+  assert.equal(unreachable[0]?.file, "group.test.js");
+  assert.equal(unreachable[0]?.line, 3);
+  assert.equal(unreachable[0]?.ok, false);
+  assert.equal(unreachable[0]?.aboutFile, false);
+  assert.ok(unreachable[0]?.errors[0]?.includes("never to groups"));
+  // The human report names the dead line; `--json` carries the finding shape.
+  const human = renderHuman(report);
+  assert.match(human, /FAIL group\.test\.js:3 \(unreachable\)/);
+  const json = JSON.parse(renderJson(report)) as {
+    ok: boolean;
+    findings: { file: string; line: number; kind: string; ok: boolean; errors: string[] }[];
+  };
+  assert.equal(json.ok, false);
+  assert.deepEqual(
+    json.findings.filter((x) => x.kind === "unreachable"),
+    [
+      {
+        file: "group.test.js",
+        line: 3,
+        kind: "unreachable",
+        ok: false,
+        errors: unreachable[0]!.errors,
+      },
+    ],
+  );
+});
+
+test("a group-line finding counts in malformed but never inflates summary.annotations", () => {
+  // Same fixture as the pin above: the binary saw and validated the ONE
+  // annotation (the group-line payload is dead at EXTRACTION, not at
+  // validation), so `annotations` stays the binary's count; the
+  // client-produced finding rides `malformed` as the exit-1 driver.
+  const f = makeRepo({
+    "group.test.js": [GROUP_INTENT, '  test("adds", () => {});', "});"].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [{ file: "group.test.js", line: 1, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, ["group.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.equal(report.summary.annotations, 1);
+  assert.equal(report.summary.malformed, 1);
+  const human = renderHuman(report);
+  assert.match(human, /specguard lint: 1 annotation, 1 malformed/);
+});
+
+test("a one-liner describe that defines its own test is EXEMPT — the annotation is claimed", () => {
+  // `describe(...) { test(...); }); // @intent: {...}` IS the test's own
+  // line, so the trailing annotation is claimed by the example and must
+  // not be flagged — the exemption is load-bearing, not cosmetic.
+  const f = makeRepo({
+    "one-liner.test.js": [
+      'describe("Cart", () => { test("adds", () => {}); }); // @intent: {"entity":"Cart","action":"add","behavior":"adds an item to an empty cart","layer":"unit"}',
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [{ file: "one-liner.test.js", line: 1, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, ["one-liner.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.ok(report.ok);
+  assert.equal(report.findings.filter((x) => x.kind === "unreachable").length, 0);
+});
+
+test("a bare @intent: token inside a description string is prose, NOT an annotation", () => {
+  // Extraction is marker-based (SPGD-8 §7), so the token also occurs inside
+  // quoted strings; INTENT_WITH_PAYLOAD requires the `{` payload opener so
+  // this description cannot read as an annotation.
+  const f = makeRepo({
+    "prose.test.js": [
+      'describe("unreachable stacked @intent: annotations", () => {',
+      '  test("adds", () => {});',
+      "});",
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend([], 0);
+  const report = inRepo(f, ["prose.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.equal(report.findings.filter((x) => x.kind === "unreachable").length, 0);
+});
+
+test("payload prose CANNOT exempt a group line — the exemption reads code before the token only", () => {
+  // The payload ("… when it( is given …") carries a literal `it(`, but the
+  // exemption is matched against line.split("@intent:")[0] only, so it can
+  // never exempt the line this pass exists to flag.
+  const f = makeRepo({
+    "payload.test.js": [
+      'describe("Cart", () => { // @intent: {"behavior":"… when it( is given …"}',
+      '  test("adds", () => {});',
+      "});",
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [{ file: "payload.test.js", line: 1, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, ["payload.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.equal(unreachable.length, 1);
+  assert.equal(unreachable[0]?.file, "payload.test.js");
+  assert.equal(unreachable[0]?.line, 1);
+});
+
+test("a file carrying both shapes returns its findings in line order", () => {
+  // The stacked arm flags line 2 (the upper comment of the run above the
+  // test on line 4); the group arm flags line 1. The merge sorts per file,
+  // so the group finding — produced SECOND — still renders first.
+  const f = makeRepo({
+    "both.test.js": [
+      GROUP_INTENT,
+      '  // @intent: {"entity":"Cart","action":"add","behavior":"increments quantity for a duplicate item","layer":"unit"}',
+      '  // @intent: {"entity":"Cart","action":"add","behavior":"clears the cart on checkout","layer":"unit"}',
+      '  test("adds", () => {});',
+      "});",
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [
+      { file: "both.test.js", line: 1, kind: null, ok: true, errors: [] },
+      { file: "both.test.js", line: 2, kind: null, ok: true, errors: [] },
+      { file: "both.test.js", line: 3, kind: null, ok: true, errors: [] },
+    ],
+    3,
+  );
+  const report = inRepo(f, ["both.test.js"], binary);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.deepEqual(
+    unreachable.map((x) => x.line),
+    [1, 2],
+  );
+  assert.match(
+    unreachable[0]!.errors[0]!,
+    /never to groups/,
+  );
+  assert.match(
+    unreachable[1]!.errors[0]!,
+    /one-line lookback/,
+  );
+});
+
 test("annotation-free repo with NO binary still exits 0 — empty is not failure", () => {
   const f = makeRepo({ "a.test.ts": "it('x', () => {});" });
   const report = inRepo(f, [], undefined);

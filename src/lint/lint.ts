@@ -26,10 +26,11 @@ import { unreachableFindings } from "./unreachable.js";
  *      "empty ≠ failure", and exit 2 is reserved for a run that had
  *      something to check and could not;
  *   1  at least one annotation is malformed — or well-formed but
- *      unreachable (stacked above another comment-form `@intent` line,
- *      so the one-line lookback never claims it; the structural pass,
- *      unreachable.ts). The ONLY code produced by inspecting content,
- *      reached in exactly one place below;
+ *      unreachable (stacked above another comment-form `@intent` line, so
+ *      the one-line lookback never claims it, or trailing on a
+ *      describe/suite/context group line, which no lookback can ever
+ *      claim; the structural pass, unreachable.ts). The ONLY code produced
+ *      by inspecting content, reached in exactly one place below;
  *   2  the linter could not do its job — misuse, an unresolvable/broken
  *      binary when annotations DID exist to validate, or a backend failure.
  *      Exit 1 is produced in exactly one place so it means that and nothing
@@ -360,11 +361,13 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   }
 
   const findings: LintFinding[] = raw.map((f) => ({ ...f, aboutFile: aboutFile(f.kind) }));
-  // SPGD-1521: the structural pass — well-formed annotations that can never
-  // be extracted. A run of ≥2 consecutive comment-form `@intent` lines
-  // immediately above an example leaves every line of the run but the LAST
-  // dead: the one-line lookback (SPGD-12 §2) claims only the line directly
-  // above the example. These become findings like any other, appended here —
+  // SPGD-1521/1524: the structural pass — well-formed annotations that can
+  // never be extracted. Two arms: a run of ≥2 consecutive comment-form
+  // `@intent` lines immediately above an example leaves every line of the
+  // run but the LAST dead (the one-line lookback, SPGD-12 §2, claims only
+  // the line directly above the example), and an `@intent:` trailing on a
+  // describe/suite/context group line is claimed by no lookback at all.
+  // These become findings like any other, appended here —
   // before `malformed` is computed and before the `unreadable` exit-2 return
   // — so the exit code, both renderers and the unread arm all see them with
   // no second path to keep in step (the Ruby CLI's `results +=
@@ -381,7 +384,9 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   // binary validated, so counting it here would inflate the total above what
   // the backend reported. The coverage-note `annotated` set below is
   // unaffected — a stacked file always also carries the line the lookback
-  // DID claim, so the file is already in the annotated set either way.
+  // DID claim, and a group-line annotation is counted by the binary itself
+  // (dead at extraction, live at validation), so the file is already in the
+  // annotated set either way.
   const annotations = findings.filter((f) => !f.aboutFile && f.kind !== "unreachable").length;
 
   // SPGD-1161: which of the checked files were read and yielded no `@intent`
