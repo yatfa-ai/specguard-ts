@@ -82,6 +82,9 @@ interface Verdict {
   body: string;
 }
 
+/** The endpoint's ordinary 202 — the verdict most examples deliver against. */
+const acceptedVerdict: Verdict = { status: 202, body: '{"test_run_id":"tr_1"}' };
+
 interface Capture {
   bodies: string[];
   encodings: (string | undefined)[];
@@ -381,7 +384,7 @@ test("--list: an empty file is a loud 0, and the warning names what was held bac
 // Selectors
 
 test("--from-line delivers a suffix and counts the prefix it held back, singular and plural", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const one = tmpFile("one.jsonl", `${runLine("1")}\n${runLine("2")}\n`);
     const r1 = await runCli(["--from-line", "2", one], srv.url);
@@ -408,7 +411,7 @@ test("--from-line delivers a suffix and counts the prefix it held back, singular
 });
 
 test("--lines delivers exactly the named set over the file's own numbering, ranges unexpanded", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const contents = [1, 2, 3, 4, 5, 6].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
     const file = tmpFile("q.jsonl", contents);
@@ -612,7 +615,7 @@ test("whitespace between --lines entries is allowed; inside one it is a typo", a
 });
 
 test("a selector past the end of the file selects nothing: exit 0, stderr warning naming the held-back count", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("1")}\n${runLine("2")}\n`);
     const r = await runCli(["--from-line", "9", file], srv.url);
@@ -637,7 +640,7 @@ test("a selector past the end of the file selects nothing: exit 0, stderr warnin
 // `[]`).
 
 test("SPGD-1358: delivering --lines 3,99 on a 5-line file differs from --lines 3 in exactly the added clause", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
     const file = tmpFile("q.jsonl", contents);
@@ -686,7 +689,7 @@ test("SPGD-1358: listing --lines 3,99 on a 5-line file differs from --lines 3 in
 });
 
 test("SPGD-1358: --json distinguishes a satisfied selector from one naming absent lines, on both paths", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
     const file = tmpFile("q.jsonl", contents);
@@ -761,7 +764,7 @@ test("SPGD-1358: a range only half answered names its portion past the end, in t
 });
 
 test("SPGD-1358: the document and the text summary name the same absent lines for one file and one spec", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     // Two renderers of ONE reading of the file, so they cannot disagree about
     // which typed lines were absent — asserted as the two actually agreeing,
@@ -911,7 +914,7 @@ test("SPGD-1358: delivery mode — the delivered set is unchanged by the absent 
   // distinct identity, so the received-body log names the selection directly.
   // The mutation must be reporting-only — the same bodies arrive with
   // `--lines 3,99` as with `--lines 3`.
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const contents = [1, 2, 3, 4, 5].map((i) => runLine(`run-${i}`)).join("\n") + "\n";
     const file = tmpFile("q.jsonl", contents);
@@ -1045,8 +1048,8 @@ test("exit 1 is ONLY the endpoint's content verdict: a 400 refuses, a 401/429/50
 
 test("a mixed file: 2 dominates 1 — the undelivered line is the fact that leaves work undone", async () => {
   // Sequence: line 1 (accepted), line 2 (refused 400), line 3 (undelivered 401).
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+  const srv = await captureServer(acceptedVerdict, [
+    acceptedVerdict,
     { status: 400, body: "nope" },
     { status: 401, body: "unauthorized" },
   ]);
@@ -1065,7 +1068,7 @@ test("a mixed file: 2 dominates 1 — the undelivered line is the fact that leav
 });
 
 test("an unparseable line on delivery is a 2, named by line number, and stops nothing else", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("1")}\nthis is not json\n${runLine("3")}\n`);
     const r = await runCli([file], srv.url);
@@ -1082,7 +1085,7 @@ test("an unparseable line on delivery is a 2, named by line number, and stops no
 });
 
 test("a line that parses to a non-object is unparseable, naming what it is", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `[1,2]\n"just a string"\n${runLine("1")}\n`);
     const r = await runCli([file], srv.url);
@@ -1096,7 +1099,7 @@ test("a line that parses to a non-object is unparseable, naming what it is", asy
 });
 
 test("a line that is not valid UTF-8 is unparseable on delivery — a verdict, not a crash", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", Buffer.concat([
       Buffer.from(runLine("1"), "utf8"), Buffer.from([0x0a]),
@@ -1126,7 +1129,7 @@ test("a network failure is a 2 reported as not delivered — never a refused run
 });
 
 test("blank lines are counted and skipped, singular and plural, and advance the numbering", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("1")}\n\n   \n${runLine("2")}\n`);
     const r = await runCli([file], srv.url);
@@ -1146,7 +1149,7 @@ test("blank lines are counted and skipped, singular and plural, and advance the 
 });
 
 test("a line over the gzip threshold rides the shared seam: gzipped, and the body still exact", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const filler = "x".repeat(300 * 1024);
     const line = `{"commit_sha":"abc","branch":"main","specs":[{"name":"${filler}","file_path":"a.test.js","line_number":1,"outcome":"passed","status":"unannotated","intent":null,"id":"x","duration":null}]}`;
@@ -1427,8 +1430,8 @@ test("SPGD-1226: a 400's details array reaches the report — every spec named u
 test("SPGD-1226: the --json document carries the published shape over a mixed file", async () => {
   const specs = detailSpecs(4);
   const refusedBody = JSON.stringify({ error: "bad_request", message: specs[0], details: specs });
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+  const srv = await captureServer(acceptedVerdict, [
+    acceptedVerdict,
     { status: 400, body: refusedBody },
     { status: 401, body: "unauthorized" },
   ]);
@@ -1549,7 +1552,7 @@ test("SPGD-1226: a delivery that never got an answer carries code null and the e
 });
 
 test("SPGD-1241: under --json an invalid-UTF-8 line's document row carries the UTF-8 verdict in reasons, not a folded empty list", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", Buffer.concat([
       Buffer.from(runLine("1"), "utf8"), Buffer.from([0x0a]),
@@ -1695,7 +1698,7 @@ test("SPGD-1226: a run that never got as far as reading <file> writes no documen
 });
 
 test("SPGD-1226: the exit code is identical with and without --json, on 0, 1 and 2", async () => {
-  const ok = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const ok = await captureServer(acceptedVerdict);
   try {
     const f0 = tmpFile("f0.jsonl", `${runLine("1")}\n`);
     assert.equal((await runCli([f0], ok.url)).code, 0);
@@ -1749,7 +1752,7 @@ test("SPGD-1226: the summary names the selector only when it demonstrably held s
 });
 
 test("SPGD-1226: blank lines are counted in the document, not dropped, and numbering is the file's", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("1")}\n\n   \n${runLine("2")}\n`);
     const r = await runCli(["--json", file], srv.url);
@@ -1838,7 +1841,7 @@ function realDrainFs(overrides: Partial<DrainFs>): DrainFs {
 }
 
 test("SPGD-1462: empties a queue whose lines were all accepted, and a second --drain sends nothing", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
@@ -1863,9 +1866,9 @@ test("SPGD-1462: empties a queue whose lines were all accepted, and a second --d
 
 test("SPGD-1462: keeps exactly the non-accepted lines of a mixed file, byte for byte, in order", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
     [
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
       refusalVerdict,
       outageVerdict,
     ],
@@ -1907,11 +1910,11 @@ test("SPGD-1462: keeps exactly the non-accepted lines of a mixed file, byte for 
 
 test("SPGD-1462: says the reported numbers are pre-drain when the drain leaves lines behind", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
     [
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
       outageVerdict,
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
     ],
   );
   try {
@@ -1941,8 +1944,8 @@ test("SPGD-1462: says the reported numbers are pre-drain when the drain leaves l
 
 test("SPGD-1462: stays silent about renumbering when nothing was accepted and when the file was emptied", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
-    [refusalVerdict, { status: 202, body: '{"test_run_id":"tr_1"}' }],
+    acceptedVerdict,
+    [refusalVerdict, acceptedVerdict],
   );
   try {
     const refusedOnly = tmpFile("refused.jsonl", `${runLine("r")}\n`);
@@ -1965,7 +1968,7 @@ test("SPGD-1462: stays silent about renumbering when nothing was accepted and wh
 });
 
 test("SPGD-1462: removes at most the lines --lines named, holding every other one", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("three.jsonl", `${runLine("a")}\n${runLine("b")}\n${runLine("c")}\n`);
     const r = await runCli(["--drain", "--lines", "2", file], srv.url, queueOverrides(file));
@@ -1989,9 +1992,9 @@ test("SPGD-1462: removes at most the lines --lines named, holding every other on
 
 test("SPGD-1462: removes the accepted suffix under --from-line, keeping the skipped prefix", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
     [
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
       refusalVerdict,
     ],
   );
@@ -2017,7 +2020,7 @@ test("SPGD-1462: removes the accepted suffix under --from-line, keeping the skip
 });
 
 test("SPGD-1462: carries a line appended while the deliveries ran into the rewrite", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const appended = `${runLine("appended")}\n`;
@@ -2057,8 +2060,8 @@ test("SPGD-1462: carries a line appended while the deliveries ran into the rewri
 // behind. The three tests below feed `--drain` that shape.
 
 test("SPGD-1462: keeps a last line the file ends without byte for byte, and its count drives the renumbering sentence", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+  const srv = await captureServer(acceptedVerdict, [
+    acceptedVerdict,
     outageVerdict,
   ]);
   try {
@@ -2084,7 +2087,7 @@ test("SPGD-1462: keeps a last line the file ends without byte for byte, and its 
 });
 
 test("SPGD-1462: rejoins a line the read caught mid-append, because the kept half ends without a newline", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     // The unterminated-read case of the tail-carry — "carries a line appended
     // while the deliveries ran into the rewrite" above covers a TERMINATED
@@ -2119,9 +2122,9 @@ test("SPGD-1462: rejoins a line the read caught mid-append, because the kept hal
 });
 
 test("SPGD-1462: removing an unterminated last line leaves the line before it with its newline", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' }, [
+  const srv = await captureServer(acceptedVerdict, [
     outageVerdict,
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
   ]);
   try {
     // The accepted one is the file's unterminated LAST line; the kept one is
@@ -2157,7 +2160,7 @@ test("SPGD-1462: refuses to combine with --list, leaving the file untouched", as
 });
 
 test("SPGD-1462: --drain takes no value — the attached form is an invalid option, like --list and --json", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
     try {
@@ -2184,7 +2187,7 @@ test("SPGD-1462: --drain takes no value — the attached form is an invalid opti
 });
 
 test("SPGD-1462: refuses to drain a path that is not the configured replay queue", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
     const before = readFileSync(file);
@@ -2205,7 +2208,7 @@ test("SPGD-1462: refuses to drain a path that is not the configured replay queue
 });
 
 test("SPGD-1462: drains a file spelled exactly as SPECGUARD_OUTPUT_PATH configures the queue", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n`);
     const r = await runCli(["--drain", file], srv.url, queueOverrides(file));
@@ -2219,7 +2222,7 @@ test("SPGD-1462: drains a file spelled exactly as SPECGUARD_OUTPUT_PATH configur
 });
 
 test("SPGD-1462: swaps the rewrite in through a same-directory rename, original intact until the swap", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const original = readFileSync(file);
@@ -2253,7 +2256,7 @@ test("SPGD-1462: swaps the rewrite in through a same-directory rename, original 
 });
 
 test("SPGD-1462: leaves the file byte-identical and exits 2 when the rename fails", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const original = readFileSync(file);
@@ -2288,9 +2291,9 @@ test("SPGD-1462: leaves the file byte-identical and exits 2 when the rename fail
 
 test("SPGD-1462: keeps the queue file's mode through the atomic swap", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
     [
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
       refusalVerdict,
       outageVerdict,
     ],
@@ -2315,9 +2318,9 @@ test("SPGD-1462: keeps the queue file's mode through the atomic swap", async () 
 
 test("SPGD-1462: rewrites a symlinked queue's target, leaving the link itself in place", async () => {
   const srv = await captureServer(
-    { status: 202, body: '{"test_run_id":"tr_1"}' },
+    acceptedVerdict,
     [
-      { status: 202, body: '{"test_run_id":"tr_1"}' },
+      acceptedVerdict,
       refusalVerdict,
       outageVerdict,
     ],
@@ -2375,7 +2378,7 @@ test("SPGD-1462: rewrites a symlinked queue's target, leaving the link itself in
 });
 
 test("SPGD-1462: states the removal in the --json summary, and only under the flag", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const drained = await runCli(["--json", "--drain", file], srv.url, queueOverrides(file));
@@ -2394,7 +2397,7 @@ test("SPGD-1462: states the removal in the --json summary, and only under the fl
 });
 
 test("SPGD-1462: names the removal in the summary line, and only when the flag asked for it", async () => {
-  const srv = await captureServer({ status: 202, body: '{"test_run_id":"tr_1"}' });
+  const srv = await captureServer(acceptedVerdict);
   try {
     const file = tmpFile("q.jsonl", `${runLine("a")}\n${runLine("b")}\n`);
     const drained = await runCli(["--drain", file], srv.url, queueOverrides(file));
