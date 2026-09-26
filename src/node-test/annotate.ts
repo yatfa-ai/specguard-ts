@@ -1,4 +1,5 @@
-import { isAbsolute, relative, sep } from "node:path";
+import fs from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { LintBackendError, checkWithBackend, type ValidatorFinding } from "../lint/backend.js";
@@ -14,11 +15,21 @@ import { SCAN_MAX_BYTES, scanTokens, selectFiles } from "../lint/discover.js";
  * this client never validates the payload's shape (that is the binary's job,
  * and the reason `src/lint/discover.ts` never parses payloads either).
  *
- * The (file, line) coordinate discipline: for `node:test`, the reporter
- * event's `data.line` points at the `test(...)` call line while the
- * annotation comment sits on the line ABOVE — measured on a real fixture
- * (pinned in test/annotate.test.ts) — so a finding matches a row when
- * `finding.line === row.line_number - LOOKBACK_LINES`.
+ * The (file, line) coordinate discipline: an annotation is a single comment
+ * line immediately above the test — OR ON THE SAME LINE AS IT (OpenTestIntent
+ * PROTOCOL.md §1; `specguard lint` accepts both forms, so telemetry must map
+ * both). For `node:test`, the reporter event's `data.line` points at the
+ * `test(...)` call line, and the preceding-comment form puts the annotation
+ * one line ABOVE — measured on a real fixture (pinned in
+ * test/annotate.test.ts). A finding therefore matches a row on the row's OWN
+ * line first (`finding.line === row.line_number` — the trailing form, Ruby
+ * `AnnotationLookup::Index#intent_for`'s `own[line]` arm), and only failing
+ * that on `finding.line === row.line_number - LOOKBACK_LINES` — where it is
+ * claimed only when that source line is a COMMENT-ONLY line
+ * (`/^\s*\/\//`, the
+ * TS analogue of the Ruby `COMMENT_LINE` gate on `inheritable`), so a
+ * trailing annotation on another test's line is never inherited by the row
+ * below it.
  *
  * NEVER-FAIL (the single hardest constraint): every way this pass can fail —
  * binary missing, discovery unreadable, backend error, malformed annotation —
@@ -29,11 +40,24 @@ import { SCAN_MAX_BYTES, scanTokens, selectFiles } from "../lint/discover.js";
  */
 
 /**
- * The measured offset between a node:test row's line (the `test(...)`
- * call) and the annotation comment line — the comment sits on the line
- * above, mirroring the Ruby client's `AnnotationLookup` one-line lookback.
+ * The measured offset of the FALLBACK arm only: in the preceding-comment
+ * form the annotation sits this many lines above the node:test row's
+ * `test(...)` call line. The OWN-line arm (a trailing `// @intent:` on the
+ * call line itself, consulted first) does not use this offset. Both arms
+ * mirror the Ruby client's `AnnotationLookup`: own line first, then the
+ * comment-only line above (`inheritable[line - 1]`).
  */
 export const ANNOTATION_LOOKBACK_LINES = 1;
+
+/**
+ * A source line whose only content is a `//` line comment — the TS analogue
+ * of the Ruby client's `AnnotationLookup::COMMENT_LINE` (`/\A\s*#/`). The
+ * line-above fallback arm may claim an annotation only when the line it sits
+ * on matches this: a trailing annotation written ON another test's line is
+ * that test's own-line intent, never the row below's. (The block-comment
+ * form is out of scope by SPGD-1519.)
+ */
+const COMMENT_ONLY_LINE = /^\s*\/\//;
 
 /** Never-fail outcome of one annotation pass. */
 export interface AnnotationOutcome {
@@ -230,13 +254,62 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       if (!byCoordinate.has(key)) byCoordinate.set(key, finding.intent);
     }
 
+    // SPGD-1519: two lookup arms, in the Ruby AnnotationLookup's order —
+    // the row's OWN line first, then the comment-only line above. The
+    // `byCoordinate` map itself is unchanged: the first ratified finding
+    // per coordinate still wins.
     let annotated = 0;
+    const flip = (row: SpecRow, intent: Record<string, unknown> | null): SpecRow => {
+      annotated += 1;
+      return { ...row, status: "annotated" as const, intent };
+    };
+    // Files the token scan could actually READ (`scans` names files
+    // absolutely; the normalized key collapses spellings). The comment
+    // gate's read-failure arm splits on this set — see `commentOnlyAt`.
+    const scanned = new Set<string>();
+    for (const scan of scans) {
+      if (!scan.unscannable) scanned.add(normalizeRepoPath(scan.file, repoRoot));
+    }
+    // Per-file source lines for the comment-only gate, built lazily: a file
+    // is read only when a row's fallback coordinate actually carries a
+    // finding (the backend had to read the file to ratify that finding, so
+    // the text existed moments ago), and each file is read at most once per
+    // pass.
+    const fileLines = new Map<string, string[] | null>();
+    // Three answers, and only one of them vetoes. `true` — the line is
+    // comment-only: the fallback arm may claim it. `false` — definitively
+    // not inheritable: either the line's text is in hand and is not a
+    // comment line (another test's trailing annotation lives there), or the
+    // file the token scan READ could not be re-read now (it changed under
+    // the pass — the reference's COMMENT_LINE gate never answers without
+    // the line's text, so the fallback arm does not fire). `null` — no
+    // text, no verdict: the gate abstains and the mapping stays
+    // byte-identical to pre-SPGD-1519 for that coordinate. A file nothing
+    // here ever read (the out-of-root verbatim pass-through, SPGD-1011's
+    // pinned join) abstains rather than vetoing: refusing to fire on no
+    // evidence would regress a contract this change must not touch. The
+    // abstain arm is unreachable with a real binary — a file the backend
+    // left as unreadable to this re-read carries no passing finding to
+    // inherit — and it never throws and never degrades the pass.
+    const commentOnlyAt = (fileKey: string, line: number): boolean | null => {
+      let lines = fileLines.get(fileKey);
+      if (lines === undefined) {
+        try {
+          const readPath = isAbsolute(fileKey) ? fileKey : join(repoRoot, fileKey);
+          lines = fs.readFileSync(readPath, "utf8").split("\n");
+        } catch {
+          lines = null;
+        }
+        fileLines.set(fileKey, lines);
+      }
+      if (lines === null) return scanned.has(fileKey) ? false : null;
+      const sourceLine = lines[line - 1];
+      return sourceLine !== undefined && COMMENT_ONLY_LINE.test(sourceLine);
+    };
     const out = rows.map((row) => {
-      // The row's line is the `test(...)` call; the annotation comment sits
-      // LOOKBACK_LINES above it.
-      const annotationLine = row.line_number - ANNOTATION_LOOKBACK_LINES;
-      if (annotationLine <= 0) return row;
-      // SPGD-1011: the row leg keys through the SAME normalization as the
+      // Ruby Index parity: line 0 is never a coordinate (FIRST_REAL_LINE).
+      if (row.line_number < 1) return row;
+      // SPGD-1011: the row legs key through the SAME normalization as the
       // finding leg above. A raw `row.file_path` can never meet the map: on
       // Windows every node:path helper yields backslash spellings
       // (`a\special\login.test.ts` vs `a/special/login.test.ts` — never
@@ -245,10 +318,24 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // (absolute pass-through) misses. Key-construction only. SPGD-1026:
       // the shared normalizer also folds a leading `./`, so a
       // `./`-spelled collector echo joins the same canonical key.
-      const key = `${normalizeRepoPath(row.file_path, repoRoot)}:${annotationLine}`;
+      const fileKey = normalizeRepoPath(row.file_path, repoRoot);
+      // ARM 1 — the row's OWN line (PROTOCOL.md §1's same-line form: a
+      // trailing `// @intent:` ON the call line). A finding here is the
+      // row's intent whatever sits above it — Ruby `own[line]` wins over
+      // `inheritable[line - 1]`.
+      const ownKey = `${fileKey}:${row.line_number}`;
+      if (byCoordinate.has(ownKey)) return flip(row, byCoordinate.get(ownKey) ?? null);
+      // ARM 2 — the preceding-comment form: the annotation comment sits
+      // LOOKBACK_LINES above the `test(...)` call.
+      const annotationLine = row.line_number - ANNOTATION_LOOKBACK_LINES;
+      if (annotationLine <= 0) return row;
+      const key = `${fileKey}:${annotationLine}`;
       if (!byCoordinate.has(key)) return row;
-      annotated += 1;
-      return { ...row, status: "annotated" as const, intent: byCoordinate.get(key) ?? null };
+      // The line above is claimable only when it is a COMMENT-ONLY line: a
+      // trailing annotation on another test's line belongs to THAT test's
+      // own-line arm (which already ran for it above), never to this row.
+      if (commentOnlyAt(fileKey, annotationLine) === false) return row;
+      return flip(row, byCoordinate.get(key) ?? null);
     });
     // SPGD-971, narrowed by SPGD-1006: degraded when at least one file was
     // looked at by NO reader — unreadable discovery-side, or read-failed
