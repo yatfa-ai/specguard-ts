@@ -6,9 +6,9 @@ import {
 import {
   ANNOTATED_EXTENSIONS,
   LintUsageError,
-  SCAN_MAX_BYTES,
   scanTokens,
   selectFiles,
+  unscannableClause,
   type FileSelection,
 } from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
@@ -310,7 +310,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         ok: false,
         exitCode: EXIT_MISUSE,
         backend: null,
-        backendNote: `${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
+        backendNote: unscannableClause(named),
         summary: {
           files: selection.files.length,
           annotations: 0,
@@ -320,7 +320,7 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
         findings: [],
         stderr: [
           ...noteLines,
-          `specguard lint: error: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}`,
+          `specguard lint: error: ${unscannableClause(named)}`,
           ...jsonProvenance,
         ],
         selection,

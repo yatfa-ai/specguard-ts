@@ -596,6 +596,16 @@ function baseNote(
 export const SCAN_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
+ * The shared "unscannable" register. Both consumers of `scanTokens`'s
+ * `unscannable` flag report the fact to a human in these exact words, so the
+ * sentence lives once, here, beside the budget it interpolates and the flag
+ * that sets it. Callers keep their own prefix and tail.
+ */
+export function unscannableClause(names: string[]): string {
+  return `${names.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${names.join(", ")}`;
+}
+
+/**
  * Count `@intent:` token occurrences per file. Line-granular and
  * string-blind by design (§7 of the protocol notes): the count gates and
  * summarizes; the binary decides what the tokens mean. An unreadable or
