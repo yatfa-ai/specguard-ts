@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { LintBackendError, checkWithBackend, type ValidatorFinding } from "../lint/backend.js";
-import { SCAN_MAX_BYTES, scanTokens, selectFiles } from "../lint/discover.js";
+import { scanTokens, selectFiles, unscannableClause } from "../lint/discover.js";
 
 /**
  * Slice 4: carry validator-ratified intent on telemetry.
@@ -135,7 +135,7 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // one de-duplicated line, so the pass warns at most once.
       const named = unscannable.map((scan) => scan.file);
       warn(
-        `SpecGuard: ${unscannable.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${named.join(", ")}; telemetry ships unannotated. The test run is unaffected.`,
+        `SpecGuard: ${unscannableClause(named)}; telemetry ships unannotated. The test run is unaffected.`,
       );
       return { rows: [...rows], annotated: 0, degraded: true };
     }
@@ -175,8 +175,7 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     //     oversize file must NOT appear: naming it there called the very
     //     rows this pass annotated "unannotated".
     const unscannableNames: string[] = unscannable.map((scan) => scan.file);
-    const unreadableClause = (): string =>
-      `${unscannableNames.length} file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): ${unscannableNames.join(", ")}`;
+    const unreadableClause = (): string => unscannableClause(unscannableNames);
 
     const resolution = resolveValidator(deps);
     if (resolution.state === "unavailable") {
