@@ -45,11 +45,13 @@ installing this package into a `node:test` project pulls in neither runner and w
 ## The reporter
 
 A [`node:test` custom reporter](https://node.dev/api/test.html#custom-reporters). Point Node at it with a
-second `--test-reporter` flag — the default reporter stays, and the two do not interfere:
+second `--test-reporter` flag — the default reporter stays, and the two do not interfere. Each
+`--test-reporter` needs its own paired `--test-reporter-destination` (Node requires the two counts to
+match, and a reporter with no destination fails the parse before any test runs):
 
 ```bash
-node --test --test-reporter=spec \
-  --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js
+node --test --test-reporter=spec --test-reporter-destination=stdout \
+  --test-reporter=./node_modules/@yatfa/specguard/dist/node-test/reporter.js --test-reporter-destination=stderr
 ```
 
 (If you run `node --test` with no directory argument it globs `**/*.test.js` for you; the reporter works
