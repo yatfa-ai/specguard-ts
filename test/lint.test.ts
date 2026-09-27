@@ -74,6 +74,43 @@ function envWith(bin?: string, cwd?: string): Record<string, string | undefined>
   return env;
 }
 
+/**
+ * A stub validate-intent binary that echoes what it was HANDED: each
+ * `--source` pattern becomes a failing schema finding naming that pattern
+ * verbatim (the same pass-through the real binary performs on
+ * `finding.file`), so a pin asserting a relative name reads the register of
+ * the paths lint actually passed to the binary, not a fabricated one. Same
+ * probe contract as `stubBackend`.
+ */
+function echoingBackend(annotations: number, exit = 1): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-validator-"));
+  const file = path.join(dir, "validate-intent");
+  fs.writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      "case \"$1\" in",
+      "  --version) printf '%s\\n' 'validate-intent stub (test) schema sha256:" + GOOD + "'; exit 0 ;;",
+      "  --schema-source) printf '%s\\n' 'schema <embedded schema> sha256:" + GOOD + "'; exit 0 ;;",
+      "esac",
+      "if [ \"$1\" = \"--source\" ]; then",
+      "  shift 2",
+      "  printf '%s' '{\"mode\":\"source\",\"findings\":['",
+      "  sep=''",
+      "  for f in \"$@\"; do",
+      "    printf '%s{\"file\":\"%s\",\"line\":1,\"kind\":\"schema\",\"ok\":false,\"errors\":[\"entity: is missing\"]}' \"$sep\" \"$f\"",
+      "    sep=','",
+      "  done",
+      `  printf '%s],"summary":{"annotations":${annotations}}}'`,
+      `  exit ${exit}`,
+      "fi",
+      "exit 0",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  return file;
+}
+
 function inRepo(
   fixture: Fixture,
   argv: string[],
@@ -235,6 +272,77 @@ test("MALFORMED annotation case: a failing finding is exit 1, the only path to i
   const json = JSON.parse(renderJson(report)) as { ok: boolean; summary: { malformed: number } };
   assert.equal(json.ok, false);
   assert.equal(json.summary.malformed, 1);
+});
+
+// --- SPGD-1533: the walk register — findings are root-relative --------------
+//
+// The bare walk (`specguard lint` with no paths and no `--changed`) named
+// every finding under an ABSOLUTE path — selectFiles' walk arm pushes
+// `path.join(dir, entry.name)` seeded with the root lint() passes as
+// process.cwd() — while explicit mode echoes the caller's spelling and
+// `--changed` mode names files relative to the root. Both renderers copy
+// `finding.file` verbatim, so one command shipped two path registers. These
+// pins are the register pins: the expected names are written out LITERALLY,
+// with no `path.relative(...)` normalization on either side — the three
+// pre-existing selectFiles pins all normalize before comparing, and that
+// normalization is exactly how the absolute register hid from them.
+
+test("walk mode reports client-produced unreachable findings under root-relative paths", () => {
+  const f = makeRepo({
+    "src/stacked.test.js": [
+      'import { test, describe } from "node:test";',
+      "",
+      STACKED_INTENT_A,
+      STACKED_INTENT_B,
+      'test("adds", () => {});',
+    ].join("\n") + "\n",
+  });
+  const binary = stubBackend(
+    [{ file: "src/stacked.test.js", line: 3, kind: null, ok: true, errors: [] }],
+    1,
+  );
+  const report = inRepo(f, [], binary); // bare walk: no paths, no --changed
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  // The unreachable row is produced CLIENT-side (unreachable.ts) and
+  // inherits `file` from the selection string, so its register IS the
+  // selection's register. Literal comparison, deliberately un-normalized:
+  // on the unfixed code this name arrives as an absolute tmp path and the
+  // pin is red for exactly that reason.
+  const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+  assert.equal(unreachable.length, 1);
+  assert.equal(unreachable[0]?.file, "src/stacked.test.js");
+  assert.equal(unreachable[0]?.line, 3);
+  assert.ok(!unreachable[0]!.file.startsWith("/"), `absolute path leaked: ${unreachable[0]?.file}`);
+  assert.ok(!unreachable[0]!.file.includes(f.root), `absolute path leaked: ${unreachable[0]?.file}`);
+  const human = renderHuman(report);
+  assert.match(human, /FAIL src\/stacked\.test\.js:3 \(unreachable\)/);
+  const json = JSON.parse(renderJson(report)) as {
+    findings: { file: string; kind: string }[];
+  };
+  assert.equal(
+    json.findings.find((x) => x.kind === "unreachable")?.file,
+    "src/stacked.test.js",
+  );
+});
+
+test("walk mode reports binary-produced schema findings under root-relative paths", () => {
+  const f = makeRepo({ "src/a.ts": GOOD_ANNOTATION, "src/b.ts": GOOD_ANNOTATION });
+  // The echo stub mirrors what it was HANDED — each --source pattern becomes
+  // a failing schema finding naming that pattern verbatim — so the findings
+  // below read the register of the paths lint actually passed to the
+  // binary, not a stub-fabricated name (which is how every other finding
+  // assertion in this file was blind to the register).
+  const binary = echoingBackend(2);
+  const report = inRepo(f, [], binary); // bare walk
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  // Literal names, un-normalized on purpose (see the walk-register header).
+  assert.deepEqual(
+    report.findings.map((x) => x.file).sort(),
+    ["src/a.ts", "src/b.ts"],
+  );
+  const human = renderHuman(report);
+  assert.match(human, /FAIL src\/a\.ts:1 \(schema\)/);
+  assert.ok(!human.includes(f.root), `absolute path leaked into the human report`);
 });
 
 // --- SPGD-1521: the structural pass — stacked comment-form `@intent` --------
