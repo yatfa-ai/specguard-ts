@@ -12,6 +12,7 @@ import {
   type FileSelection,
 } from "./discover.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
+import path from "node:path";
 import { provenanceLine } from "./report.js";
 import { unreachableFindings } from "./unreachable.js";
 
@@ -206,6 +207,26 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
     selection.files.length > 0
       ? [provenanceLine(selection.files.length, selection)]
       : [];
+
+  // SPGD-1533: the walk arm of `selectFiles` pushes ABSOLUTE paths — the
+  // recursion is seeded with `root`, which this function passes as
+  // `process.cwd()` — while explicit mode echoes the caller's spelling and
+  // `--changed` mode names files relative to the root. Normalize ONLY the
+  // walk arm, here at the lint consumer, so every finding lands in the
+  // root-relative register the other two modes and the Ruby twin
+  // (`file_selector.rb`'s `Dir.glob(base: root)`) already report: the
+  // binary's schema rows mirror what it is handed, and the client-produced
+  // unreachable rows inherit `file` from the selection string, so one
+  // rebuild here fixes both producers and both renderers. The
+  // normalization deliberately does NOT move into `selectFiles` itself:
+  // that function is shared with src/node-test/annotate.ts, which passes
+  // its own root and joins finding keys against the absolute form.
+  if (selection.mode === "walk") {
+    selection = {
+      ...selection,
+      files: selection.files.map((file) => path.relative(process.cwd(), file)),
+    };
+  }
 
   const scans = scanTokens(selection.files);
   const tokenCount = scans.reduce((sum, scan) => sum + scan.tokens, 0);
