@@ -85,3 +85,43 @@ test("SPGD-1525: the README states the true status rule and the two-arm attribut
     "the Vitest and Jest sections must each point at the single attribution statement",
   );
 });
+
+// Seal for SPGD-1531: the README's reporter quick-start (`## The reporter`
+// section) paired two --test-reporter flags with zero
+// --test-reporter-destination flags. Node's test runner requires the
+// --test-reporter and --test-reporter-destination counts to match, so the
+// documented command died at CLI parse (ERR_INVALID_ARG_VALUE) before a
+// single test ran — on the supported floor (package.json engines: node >= 20).
+//
+// The absence half is the point (the SPGD-1525 comment block above makes the
+// same argument for its own needles): `--test-reporter` appears in the
+// unfixed README and stays in the fixed one — the CI example's
+// single-reporter invocation is valid as written and deliberately unedited —
+// so a positive-only seal would pass over the defect. The seal pins the exact
+// unpaired shape's absence instead.
+//
+// The compiled test runs from .test-build/test/, so the package root is two
+// levels up (the house README-seal pattern, test/ingest-cli.test.ts).
+test("SPGD-1531: the README reporter quick-start pairs every --test-reporter with a --test-reporter-destination", () => {
+  // The exact unpaired shape: `--test-reporter=spec` on one line and a second
+  // bare `--test-reporter=` on the next. With zero destinations node --test
+  // refuses to start the run at all.
+  assert.ok(
+    !readme.includes("--test-reporter=spec \\\n  --test-reporter="),
+    "the unpaired two-reporter quick-start is back in README.md's `## The reporter` " +
+      "section — each --test-reporter needs a paired --test-reporter-destination " +
+      "or node --test throws ERR_INVALID_ARG_VALUE at CLI parse",
+  );
+  // The section must now demonstrate the paired form. Scoped to the section,
+  // not the file: single-reporter invocations elsewhere in the README are
+  // valid as written.
+  const reporterSection = readme
+    .split("\n## ")
+    .find((chunk) => chunk.startsWith("The reporter"));
+  assert.ok(reporterSection, "the `## The reporter` section is gone from README.md");
+  assert.ok(
+    reporterSection.includes("--test-reporter-destination"),
+    "the `## The reporter` section no longer pairs --test-reporter with " +
+      "--test-reporter-destination",
+  );
+});
