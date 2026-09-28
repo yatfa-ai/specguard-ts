@@ -84,6 +84,14 @@ export interface AnnotateDeps extends ValidatorDeps {
  * key would mint a new nonsense coordinate, not normalize). A leading `..`
  * is NOT `./` and is never touched; interior `./` segments stay (full
  * path-normalization territory — out of scope by the ticket).
+ *
+ * SPGD-1537: this helper has TWO duties in this file, and they are separate.
+ * (1) KEY construction, for the coordinate join and the unannotatable dedup —
+ * both legs share it, so a fold applies identically to both and they still
+ * meet. (2) DISPLAY, for the three unscannable warning name-lists, so an
+ * annotate warning names a file with the same string `specguard lint` prints
+ * for it. The absolute pass-through serves both: an out-of-root coordinate
+ * joins verbatim AND prints verbatim, never as a `../` escape.
  */
 export function normalizeRepoPath(file: string, repoRoot: string): string {
   if (!isAbsolute(file)) {
@@ -133,7 +141,13 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // arm is exempt there, SPGD-1006: the backend reads oversize files and
       // annotates their rows — plus the binary's read findings, folded into
       // one de-duplicated line, so the pass warns at most once.
-      const named = unscannable.map((scan) => scan.file);
+      // SPGD-1537: normalize for DISPLAY. `selection.files` is absolute in
+      // this consumer by SPGD-1533's deliberate fence (the join keys ride the
+      // absolute form), but a human-facing name must match what `specguard
+      // lint` prints for the same file on the same tree — root-relative.
+      // A file outside `repoRoot` keeps its absolute spelling verbatim
+      // (normalizeRepoPath's second-branch guard), never a `../` escape.
+      const named = unscannable.map((scan) => normalizeRepoPath(scan.file, repoRoot));
       warn(
         `SpecGuard: ${unscannableClause(named)}; telemetry ships unannotated. The test run is unaffected.`,
       );
@@ -174,7 +188,13 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     //     post-backend "ships unannotated" warning and `degraded`, where an
     //     oversize file must NOT appear: naming it there called the very
     //     rows this pass annotated "unannotated".
-    const unscannableNames: string[] = unscannable.map((scan) => scan.file);
+    // SPGD-1537: normalized for DISPLAY only — same reason as the SPGD-929
+    // arm above. `selection.files` itself stays absolute; only the printed
+    // names are relativized, so both early-fail arms below name a file the
+    // way `specguard lint` names it.
+    const unscannableNames: string[] = unscannable.map((scan) =>
+      normalizeRepoPath(scan.file, repoRoot),
+    );
     const unreadableClause = (): string => unscannableClause(unscannableNames);
 
     const resolution = resolveValidator(deps);
@@ -226,7 +246,11 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       const key = normalizeRepoPath(file, repoRoot);
       if (seenUnannotatable.has(key)) return;
       seenUnannotatable.add(key);
-      unannotatableNames.push(file);
+      // SPGD-1537: the normalized key is ALSO what gets displayed. Pushing the
+      // raw `file` printed the absolute discovery spelling here while
+      // `specguard lint` printed the root-relative one for the same file. The
+      // dedup itself is unchanged — same key, same set, same collapse.
+      unannotatableNames.push(key);
     };
     for (const scan of unscannable) {
       if (scan.unscannableReason === "unreadable") rememberUnannotatable(scan.file);
