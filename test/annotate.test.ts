@@ -296,7 +296,17 @@ test(
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /could not be scanned/);
     assert.match(warnings[0]!, new RegExp(`larger than ${SCAN_MAX_BYTES} bytes`));
-    assert.ok(warnings[0]!.includes(big)); // names the file
+    // SPGD-1537: names the file in the ROOT-RELATIVE register, the same
+    // register `specguard lint` prints. Written out LITERALLY, with no
+    // path.relative(...) between the warning and the assertion — the
+    // SPGD-1533 discipline (test/lint.test.ts:277-288): normalizing before
+    // comparing is exactly how the absolute register hid from this pin, which
+    // used to assert `includes(big)` and so RATIFIED the absolute spelling.
+    assert.ok(warnings[0]!.includes(": big.test.js;"), `not root-relative: ${warnings[0]}`);
+    // Negatively too, so a regression to the absolute form is red rather than
+    // merely differently-spelled (the shape at test/lint.test.ts:315-316).
+    assert.ok(!warnings[0]!.includes(root), `absolute path leaked: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(": /"), `absolute path leaked: ${warnings[0]}`);
     assert.match(warnings[0]!, /test run is unaffected/);
     assert.deepEqual(out.rows, input); // rows untouched on the new arm
   },
@@ -323,7 +333,10 @@ test(
     assert.equal(out.degraded, true);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /could not be scanned/);
-    assert.ok(warnings[0]!.includes(locked)); // names the file
+    // SPGD-1537: root-relative register, literal, un-normalized (see the
+    // oversize pin above). This pin previously asserted `includes(locked)`.
+    assert.ok(warnings[0]!.includes(": locked.test.js;"), `not root-relative: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(root), `absolute path leaked: ${warnings[0]}`);
     assert.match(warnings[0]!, /test run is unaffected/);
     assert.deepEqual(out.rows, input);
   },
@@ -350,10 +363,86 @@ test(
     const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /could not be scanned/);
-    assert.ok(warnings[0]!.includes(big)); // names the unscannable file
+    // SPGD-1537: names the unscannable file ROOT-RELATIVELY, literally and
+    // un-normalized (see the oversize pin above). Previously `includes(big)`.
+    assert.ok(warnings[0]!.includes(": big.test.js;"), `not root-relative: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(root), `absolute path leaked: ${warnings[0]}`);
     assert.match(warnings[0]!, /validator backend could not be resolved/); // backend fact kept on the same line
     assert.equal(out.degraded, true);
     assert.deepEqual(out.rows, input);
+  },
+);
+
+test(
+  "SPGD-1537: the display register is root-RELATIVE, not a basename — a NESTED unscannable file prints src/deep/big.test.js",
+  () => {
+    // The three re-pointed pins above all put their fixture at the root, so
+    // `big.test.js` there is indistinguishable from a basename: a bug that
+    // printed `path.basename(...)` would pass them all. This example nests
+    // the file, so only genuine relativization against repoRoot satisfies it
+    // — and it is the pin that states the ticket's contract directly: the
+    // annotate warning names a file with the SAME string `specguard lint`
+    // prints on the same tree (test/lint.test.ts's walk-register pins).
+    // Literal and un-normalized, per the SPGD-1533 discipline.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    fs.mkdirSync(path.join(root, "src", "deep"), { recursive: true });
+    const big = path.join(root, "src", "deep", "big.test.js");
+    fs.writeFileSync(big, oversizeLine.repeat(Math.ceil((SCAN_MAX_BYTES + 1024) / oversizeLine.length)));
+    const warnings: string[] = [];
+    const input = [row("src/deep/big.test.js", 2, "x")];
+    const out = annotateRows(input, { repoRoot: root, env: {}, warn: (m) => warnings.push(m) });
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.ok(
+      warnings[0]!.includes(": src/deep/big.test.js;"),
+      `not root-relative: ${warnings[0]}`,
+    );
+    // Negative half: neither the absolute register nor a bare basename.
+    assert.ok(!warnings[0]!.includes(root), `absolute path leaked: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(": big.test.js;"), `basename, not relative: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(": /"), `absolute path leaked: ${warnings[0]}`);
+  },
+);
+
+test(
+  "SPGD-1537: an unannotatable file OUTSIDE repoRoot still prints its ABSOLUTE path verbatim — no ../ escape",
+  () => {
+    // normalizeRepoPath's second-branch guard, at a DISPLAY site: relativizing
+    // an out-of-root path would mint a nonsense `../../tmp/…` name, so the
+    // absolute spelling is the honest one and the fix must not touch it. The
+    // row leg's twin of this contract is pinned at SPGD-1011's out-of-root
+    // join example; this is the warning leg's.
+    //
+    // Discovery cannot reach outside root — annotateRows always walks
+    // `selectFiles([], repoRoot)` — so the out-of-root name necessarily
+    // arrives from the BACKEND echo ("the backend echoes whatever it was
+    // handed"), which is the third display site's other source.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-annotate-"));
+    fs.writeFileSync(
+      path.join(root, "good.test.js"),
+      '// @intent: {"entity":"Cart","action":"x","behavior":"y"}\ntest("x", () => {});\n',
+    );
+    const outside = path.join(os.tmpdir(), "specguard-1537-elsewhere", "out.test.js");
+    const binary = stubBackend(
+      [
+        { file: outside, line: null, kind: "read", ok: false, errors: ["read out.test.js: nope"], intent: null },
+        { file: "good.test.js", line: 1, kind: null, ok: true, errors: [], intent: INTENT_APPLY },
+      ],
+      1,
+    );
+    const warnings: string[] = [];
+    const input = [row("good.test.js", 2, "x")];
+    const out = annotateRows(input, {
+      repoRoot: root,
+      env: { [VALIDATE_INTENT_ENV_VAR]: binary },
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(out.degraded, true);
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0]!.includes(outside), `out-of-root name was rewritten: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(".."), `../ escape minted: ${warnings[0]}`);
+    // The never-fail mapping is untouched: the passing finding still maps.
+    assert.equal(out.annotated, 1);
   },
 );
 
@@ -747,7 +836,14 @@ test(
     assert.match(warnings[0]!, /could not be scanned/);
     assert.match(warnings[0]!, /1 file\(s\)/); // the two spellings collapsed to ONE entry
     assert.equal(warnings[0]!.split("big.test.js").length - 1, 1); // named exactly once
-    assert.ok(warnings[0]!.includes(big)); // the first-seen (absolute) spelling survives
+    // SPGD-1537: the DISPLAY register is now root-relative (the surviving
+    // entry prints `big.test.js`, the same string `specguard lint` prints),
+    // while the DEDUP KEY is unchanged — it was already the normalized path,
+    // which is what collapses the absolute echo and its ./-spelled twin. The
+    // two assertions above ARE that collapse contract and are untouched.
+    // Literal and un-normalized, per the SPGD-1533 discipline.
+    assert.ok(warnings[0]!.includes(": big.test.js;"), `not root-relative: ${warnings[0]}`);
+    assert.ok(!warnings[0]!.includes(root), `absolute path leaked: ${warnings[0]}`);
     // The never-fail mapping is untouched: the passing finding still maps.
     assert.equal(out.annotated, 1);
     assert.equal(out.rows[0]!.status, "annotated");
