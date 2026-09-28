@@ -360,7 +360,17 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
       // report can disclose the narrowing instead of doing it silently.
       skipped += 1;
     } else {
-      files.push(relative);
+      // SPGD-1539: the REGISTER is posix-separated — the contract this repo
+      // states at src/node-test/annotate.ts:79 ("Mirror the collector's path
+      // normalization: repo-relative, posix separators"), which the three
+      // collectors' `relativize` and `normalizeRepoPath` already fold to.
+      // The fold lands HERE, on the pushed value alone, and deliberately NOT
+      // on the `relative` local above: that local also feeds the `outside`
+      // guard (which tests `..${path.sep}`) and `skippedDirectory` (which
+      // splits on `path.sep`), so folding it in place would, on win32, let an
+      // out-of-root file past the scoping guard and disable the
+      // SKIPPED_DIRECTORIES fence entirely. Identity where sep === "/".
+      files.push(relative.split(path.sep).join("/"));
       if (fromUntrackedLeg) untracked += 1;
     }
   }
