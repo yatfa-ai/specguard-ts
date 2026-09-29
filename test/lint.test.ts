@@ -970,6 +970,88 @@ test("OVERSIZED (> SCAN_MAX_BYTES) annotated file, NO binary: exit 2 — the unc
   assert.match(cli.stderr, /specguard lint: error: .*big\.ts/);
 });
 
+// --- SPGD-1546: the unscannableClause register at the misuse arm -------------
+//
+// The two SPGD-926 pins above assert name-presence only (`/guarded\.ts/`,
+// `/specguard lint: error: .*guarded\.ts/`), which is exactly the looseness
+// SPGD-1533 removed from every other walk surface: four independent
+// mutations each leave the whole suite green — (a) restoring the absolute
+// register via `path.resolve(process.cwd(), s.file)`, (b) building the name
+// list from `selection.files` instead of `unscannable` (scannable files
+// named as unscannable), (c) swapping the helper's `join(", ")`, and (d)
+// dropping the helper's `N file(s)` count clause, which NO existing pin
+// holds (the suite's only `/1 file\(s\)/` assertions ride annotate's
+// post-backend hand-rolled clause). These pins hold the register the way
+// the binary-side read register is held above (full-literal deepEqual) and
+// the way SPGD-1537 pinned the annotate consumer: the whole stderr stream,
+// byte-for-byte, at both the lint() and the CLI boundary.
+
+test(
+  "SPGD-1546: the misuse register is byte-pinned — root-relative names of ONLY the unscannable files, comma-joined, with the count clause (one unreadable + one oversize beside a scannable file, NO binary)",
+  {
+    skip:
+      process.getuid?.() === 0
+        ? "root bypasses file permissions — the chmod 000 fixture would be readable and this arm would pass vacuously"
+        : false,
+  },
+  () => {
+    // Both unscannable CAUSES in one run (unreadable + oversize), plus one
+    // perfectly scannable file the register must never name: a name list
+    // drawn from `selection.files` (mutation b) would name plain.ts; an
+    // absolute register (a), a swapped join (c) or a dropped count clause
+    // (d) each fail the byte-pin on their own axis.
+    const f = makeRepo({
+      "b_guarded.ts": GOOD_ANNOTATION, // carries a token, but chmod 000 makes it unscannable
+      "plain.ts": "const one = 1;\n", // scannable — must never be named
+    });
+    fs.writeFileSync(
+      path.join(f.root, "a_big.ts"),
+      Buffer.concat([Buffer.from(GOOD_ANNOTATION + "\n"), Buffer.alloc(SCAN_MAX_BYTES + 1, "x")]),
+    );
+    fs.chmodSync(path.join(f.root, "b_guarded.ts"), 0o000);
+    const report = inRepo(f, [], undefined);
+    assert.equal(report.exitCode, EXIT_MISUSE);
+    assert.ok(!report.ok);
+    assert.equal(report.backend, null);
+    assert.equal(report.findings.length, 0);
+    // Walk order is sorted, so the oversize file is named first; both
+    // causes count into the one clause; the clause rides backendNote and
+    // stderr composed from the same call.
+    const clause = `2 file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): a_big.ts, b_guarded.ts`;
+    assert.equal(report.backendNote, clause);
+    assert.deepEqual(report.summary, { files: 3, annotations: 0, malformed: 0, unreadable: 2 });
+    // The whole stream, byte-pinned: exactly the one error line — no stray
+    // note or provenance line rides a walk-mode misuse run.
+    assert.deepEqual(report.stderr, [`specguard lint: error: ${clause}`]);
+    // The register survives to the process surface byte-for-byte, beside
+    // the no-findings document suppression.
+    const cli = runCliInRepo(f, ["lint", "--json"]);
+    assert.equal(cli.exit, EXIT_MISUSE);
+    assert.equal(cli.stdout, ""); // cli.ts's rule: exit 2 + no findings ⇒ no document
+    assert.deepEqual(cli.stderr.trimEnd().split("\n"), [`specguard lint: error: ${clause}`]);
+  },
+);
+
+test("SPGD-1546: the misuse register holds the SINGULAR count clause — '1 file(s)' naming only the oversize file beside a scannable one (runs everywhere, no privileges)", () => {
+  // The suite's first pin of the singular rendering on the SHARED helper:
+  // the existing `/1 file\(s\)/` assertions (annotate.test.ts) ride that
+  // consumer's post-backend hand-rolled clause, so before this pin the
+  // helper's count clause was held by nothing for the 1-file case. The
+  // scannable sibling also holds the only-the-unscannable shape without
+  // privileges (mutation b) for hosts where the chmod pin skips.
+  const f = makeRepo({ "plain.ts": "const one = 1;\n" });
+  fs.writeFileSync(
+    path.join(f.root, "big.ts"),
+    Buffer.concat([Buffer.from(GOOD_ANNOTATION + "\n"), Buffer.alloc(SCAN_MAX_BYTES + 1, "x")]),
+  );
+  const report = inRepo(f, [], undefined);
+  assert.equal(report.exitCode, EXIT_MISUSE);
+  const clause = `1 file(s) could not be scanned (unreadable or larger than ${SCAN_MAX_BYTES} bytes): big.ts`;
+  assert.equal(report.backendNote, clause);
+  assert.deepEqual(report.summary, { files: 2, annotations: 0, malformed: 0, unreadable: 1 });
+  assert.deepEqual(report.stderr, [`specguard lint: error: ${clause}`]);
+});
+
 // --- SPGD-1124: the CLI boundary of the exit contract -----------------------
 //
 // lint() deliberately re-throws anything that is not a typed verdict; before
