@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 import { lint, EXIT_OK, EXIT_MALFORMED, EXIT_MISUSE } from "../src/lint/lint.js";
 import { renderJson, renderHuman } from "../src/lint/report.js";
+import { ownLineShadowFindingsInText } from "../src/lint/unreachable.js";
 import {
   selectFiles,
   changedNameUnion,
@@ -2799,4 +2801,99 @@ test("SPGD-1550: a single CODE line between the @intent and its test is NOT flag
     assert.deepEqual(flagged, [], `interleave ${JSON.stringify(between)}`);
     assert.equal(report.summary.malformed, 0);
   }
+});
+
+// ── SPGD-1556: the OWN-LINE-SHADOW unreachable arm ──────────────────────────
+// A comment-form `@intent:` directly above an example that ALSO carries its
+// own trailing `@intent: {…}` loses to own-line-first extraction (annotate.ts
+// ARM 1 before ARM 2), so no test can ever claim it. Only the run's LAST line
+// is flagged; the stacked arm owns the rest of a >=2 run.
+
+const SHADOW_TRAIL =
+  '// @intent: { "behavior": "trailing annotation owns the test", "layer": "unit", "entity": "session", "action": "create" }';
+const SHADOW_ONE_LINER = `test("x", () => {}); ${SHADOW_TRAIL}`;
+
+test("SPGD-1556: a comment @intent directly above a trailing-annotated one-liner exits 1 with ONE finding on the comment line", () => {
+  const { file, report, flagged } = sepRun("shadow-one", [SEP_INTENT, SHADOW_ONE_LINER], [1, 2]);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.ok(!report.ok);
+  assert.deepEqual(flagged, [1]);
+  const row = report.findings.find((x) => x.kind === "unreachable")!;
+  assert.equal(row.file, file);
+  assert.equal(row.ok, false);
+  assert.equal(row.aboutFile, false);
+  assert.equal(row.intent, null);
+  assert.ok(row.errors[0]?.includes("own-line-first"));
+  assert.match(renderHuman(report), /FAIL shadow-one\.test\.js:1 \(unreachable\)/);
+  assert.doesNotMatch(renderHuman(report), /FAIL shadow-one\.test\.js:2 \(unreachable\)/);
+  const json = JSON.parse(renderJson(report)) as {
+    ok: boolean;
+    findings: { line: number; kind: string; ok: boolean }[];
+  };
+  assert.equal(json.ok, false);
+  assert.ok(json.findings.some((x) => x.line === 1 && x.kind === "unreachable" && x.ok === false));
+  assert.equal(report.summary.annotations, 2);
+  assert.equal(report.summary.malformed, 1);
+});
+
+test("SPGD-1556: a stacked pair above a trailing-annotated one-liner flags BOTH run lines, none twice", () => {
+  const { report, flagged } = sepRun(
+    "shadow-stacked",
+    [SEP_INTENT, SEP_INTENT_2, SHADOW_ONE_LINER],
+    [1, 2, 3],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1, 2]);
+  assert.equal(report.summary.annotations, 3);
+  assert.equal(report.summary.malformed, 2);
+});
+
+test("SPGD-1556: a comment above a test with NO trailing annotation stays green", () => {
+  const { report, flagged } = sepRun("shadow-none", [SEP_INTENT, 'test("x", () => {});'], [1]);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+  assert.equal(report.summary.malformed, 0);
+});
+
+test("SPGD-1556: a one-liner whose trailing text is a plain comment (no @intent: {) stays green", () => {
+  const { report, flagged } = sepRun(
+    "shadow-plain-trailer",
+    [SEP_INTENT, 'test("x", () => {}); // just a note'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+});
+
+test("SPGD-1556: separated shapes are not flagged by the shadow arm (example must be on the line right after the run)", () => {
+  for (const between of ["", "// an ordinary note"]) {
+    const { flagged } = sepRun("shadow-separated", [SEP_INTENT, between, SHADOW_ONE_LINER], [1, 3]);
+    // The separated arm (SPGD-1550) owns this shape: exactly line 1, once.
+    assert.deepEqual(flagged, [1], `interleave ${JSON.stringify(between)}`);
+  }
+  const text = [SEP_INTENT, "", SHADOW_ONE_LINER, ""].join("\n");
+  assert.deepEqual(ownLineShadowFindingsInText(text, "f.test.js"), []);
+  const text2 = [SEP_INTENT, "const x = 1;", SHADOW_ONE_LINER, ""].join("\n");
+  assert.deepEqual(ownLineShadowFindingsInText(text2, "f.test.js"), []);
+});
+
+test("SPGD-1556: prose guard — an @intent: without { in the example's description does not trigger", () => {
+  const { report, flagged } = sepRun(
+    "shadow-prose",
+    [SEP_INTENT, 'test("mentions @intent: in prose", () => {});'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+});
+
+test("SPGD-1556: linting annotated-same-line.test.js's text flags exactly line 13 (fixture itself untouched)", () => {
+  const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "annotated-same-line.test.js");
+  const text = fs.readFileSync(fixture, "utf8");
+  const found = ownLineShadowFindingsInText(text, "annotated-same-line.test.js");
+  assert.deepEqual(found.map((x) => x.line), [13]);
+  // ...and through the full lint pipeline on a copy.
+  const { report, flagged } = sepRun("shadow-fixture", text.replace(/\n$/, "").split("\n"), [11, 13, 14]);
+  assert.deepEqual(flagged, [13]);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
 });

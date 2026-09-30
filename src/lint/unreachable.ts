@@ -50,6 +50,23 @@ import type { LintFinding } from "./lint.js";
  * are mutually exclusive by construction. Code between, longer gaps, and a
  * `describe(` beneath (SPGD-1522's deferral) are out of scope.
  *
+ * The OWN-LINE-SHADOW arm (SPGD-1556) is a fourth way to be dead, also with
+ * no Ruby twin yet: a comment-form `@intent:` run directly above an example
+ * line that ALSO carries its own trailing `@intent: {…}` payload. Extraction
+ * is own-line-first (annotate.ts ARM 1 returns the row's own annotation
+ * before ARM 2, the comment-above lookback, is consulted), so the comment
+ * above can never be claimed by any test — while linting clean. The repo's
+ * own fixture pins the extraction half deliberately
+ * (`fixtures/annotated-same-line.test.js`, "the comment above must lose to
+ * the own line"). The rule: for each maximal run ending at L (exclusive
+ * `runEnd`), when `lines[runEnd]` is an example line carrying an
+ * `@intent: {` payload, flag ONLY the run's LAST line. The stacked arm
+ * already flags all-but-last of a ≥2 run whenever an example follows, so
+ * flagging only the last line here keeps the arms disjoint and every dead
+ * line flagged exactly once. The separated arm requires a blank/comment
+ * right after the run and this one requires the example there, so those two
+ * are disjoint by construction as well.
+ *
  * Known heuristic limits, mirrored honestly from the Ruby twin's comments
  * (scanner.rb ~:407-446): the group selector keys on the keyword at line
  * start, the payload opener must be `{` (marker-based extraction, SPGD-8
@@ -107,6 +124,14 @@ const UNREACHABLE_SEPARATED_ANNOTATION =
   "comment or blank line, and the one-line lookback claims only the line directly above " +
   "the test — this annotation is discarded at extraction (SPGD-12 §2). Move it to " +
   "directly above the test (or merge it into the line that is)";
+
+/** Why a shadowed comment fails: the example's own-line `@intent:` wins under
+ * own-line-first extraction, so the comment line directly above is discarded. */
+const UNREACHABLE_OWN_LINE_SHADOW =
+  "unreachable annotation: the test below carries its own trailing @intent:, and " +
+  "extraction is own-line-first (SPGD-12 §2) — that own-line annotation wins, so this " +
+  "comment line is discarded and no test can ever claim it. Delete it, or merge its " +
+  "behavior into the trailing @intent:";
 
 /** A blank (whitespace-only) line — one of the two interleaves the separated arm reads. */
 const BLANK_LINE = /^\s*$/;
@@ -260,6 +285,48 @@ export function separatedFindingsInText(text: string, file: string): LintFinding
 }
 
 /**
+ * The own-line-shadow findings for one file's source text, in line order:
+ * for each maximal comment-form `@intent:` run whose immediately-following
+ * line is an example line that itself carries an `@intent: {` payload, ONE
+ * finding on the run's LAST line (the line the lookback would have claimed
+ * had the example no annotation of its own). Earlier lines of a ≥2 run are
+ * the stacked arm's.
+ */
+export function ownLineShadowFindingsInText(text: string, file: string): LintFinding[] {
+  const lines = text.split("\n");
+  const findings: LintFinding[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    if (!COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+      continue;
+    }
+
+    i += 1;
+    while (i < lines.length && COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+    }
+    const runEnd = i; // exclusive; lines[runEnd] is the candidate example
+
+    const example = lines[runEnd];
+    if (example !== undefined && EXAMPLE_LINE.test(example) && INTENT_WITH_PAYLOAD.test(example)) {
+      findings.push({
+        file,
+        line: runEnd, // 1-based number of lines[runEnd - 1], the run's last line
+        kind: "unreachable",
+        ok: false,
+        errors: [UNREACHABLE_OWN_LINE_SHADOW],
+        intent: null,
+        aboutFile: false,
+      });
+    }
+  }
+
+  return findings;
+}
+
+/**
  * The group-line findings for one file's source text, in line order: one per
  * describe/suite/context GROUP line carrying a trailing `@intent:` payload
  * (INTENT_WITH_PAYLOAD), for lines that define no example of their own
@@ -318,17 +385,21 @@ export function unreachableFindings(files: string[]): LintFinding[] {
     if (buf.byteLength > SCAN_MAX_BYTES) continue;
     const text = buf.toString("utf8");
     // Ruby parity (scanner.rb `unreachable_findings_in_text`, two arms; the
-    // separated arm is TS-first, SPGD-1550): the arms are disjoint by
-    // construction — the stacked pass reads only `//`-leading comment lines
-    // and needs an example at the run's end, the separated pass reads the
-    // same lines but needs a blank/comment there, the group pass only lines
-    // that are not `//`-leading — so the merge cannot double-flag a line, and the per-file sort restores the
+    // separated and own-line-shadow arms are TS-first, SPGD-1550/1556): the
+    // arms are disjoint by construction — the stacked pass reads only
+    // `//`-leading comment lines and needs an example at the run's end
+    // (flagging all but the run's last line), the own-line-shadow pass reads
+    // the same runs and example but flags ONLY the run's last line, and only
+    // when that example carries its own payload, the separated pass needs a
+    // blank/comment right after the run, the group pass only lines that are
+    // not `//`-leading — so the merge cannot double-flag a line, and the per-file sort restores the
     // file-then-line order `unreachableFindings` promises. (`?? 0` is a type
     // accommodation only — ValidatorFinding.line is nullable for binary rows,
     // but every arm above always emits a 1-based line.)
     const perFile = [
       ...stackedFindingsInText(text, file),
       ...separatedFindingsInText(text, file),
+      ...ownLineShadowFindingsInText(text, file),
       ...groupLineFindingsInText(text, file),
     ];
     perFile.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
