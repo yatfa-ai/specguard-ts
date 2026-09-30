@@ -2631,3 +2631,172 @@ test("SPGD-1284: help's --changed block names the dependency/build directory fen
   // The still-true untracked clause was not deleted wholesale.
   assert.match(text, /not been git-added is still checked/);
 });
+
+// ── SPGD-1550: the SEPARATED unreachable arm ────────────────────────────────
+// A well-formed comment-form `@intent:` separated from its example by ONE
+// intervening blank/ordinary-comment line is discarded at extraction (the
+// one-line lookback claims only the line directly above the example) while
+// the binary validates it clean. The pins assert the FAIL row / exit code /
+// flagged lines — never the annotation count alone, which is already true
+// (and green) on unfixed code.
+
+const SEP_INTENT =
+  '// @intent: { "behavior": "user can log in with valid credentials", "layer": "unit", "entity": "session", "action": "create" }';
+const SEP_INTENT_2 =
+  '// @intent: { "behavior": "user is rejected with a bad password", "layer": "unit", "entity": "session", "action": "reject" }';
+
+function sepStub(file: string, lines: number[]): string {
+  return stubBackend(
+    lines.map((line) => ({ file, line, kind: null, ok: true, errors: [] })),
+    lines.length,
+  );
+}
+
+function sepRun(name: string, body: string[], annotationLines: number[]) {
+  const file = `${name}.test.js`;
+  const f = makeRepo({ [file]: body.join("\n") + "\n" });
+  const report = inRepo(f, [file], sepStub(file, annotationLines));
+  return {
+    file,
+    report,
+    flagged: report.findings.filter((x) => x.kind === "unreachable").map((x) => x.line),
+  };
+}
+
+test("SPGD-1550: an @intent separated from its test by one ordinary comment exits 1 with a FAIL row", () => {
+  const { file, report, flagged } = sepRun(
+    "comment-sep",
+    [SEP_INTENT, "// an ordinary note about this test", 'test("separated by ordinary comment", () => {});'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.ok(!report.ok);
+  assert.deepEqual(flagged, [1]);
+  const row = report.findings.find((x) => x.kind === "unreachable")!;
+  assert.equal(row.file, file);
+  assert.equal(row.ok, false);
+  assert.equal(row.aboutFile, false);
+  assert.ok(row.errors[0]?.includes("one-line lookback"));
+  assert.match(renderHuman(report), /FAIL comment-sep\.test\.js:1 \(unreachable\)/);
+  const json = JSON.parse(renderJson(report)) as {
+    ok: boolean;
+    findings: { line: number; kind: string; ok: boolean }[];
+  };
+  assert.equal(json.ok, false);
+  assert.ok(json.findings.some((x) => x.line === 1 && x.kind === "unreachable" && x.ok === false));
+  // Counting: the binary's count stands; the flagged line rides `malformed`.
+  assert.equal(report.summary.annotations, 1);
+  assert.equal(report.summary.malformed, 1);
+});
+
+test("SPGD-1550: an @intent separated from its test by one blank line exits 1 with the same verdict", () => {
+  const { report, flagged } = sepRun(
+    "blank-sep",
+    [SEP_INTENT, "", 'test("separated by blank", () => {});'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1]);
+  assert.match(renderHuman(report), /FAIL blank-sep\.test\.js:1 \(unreachable\)/);
+  assert.equal(report.summary.annotations, 1);
+  assert.equal(report.summary.malformed, 1);
+});
+
+test("SPGD-1550: a >=2-line run + one interleave + example flags EVERY line of the run", () => {
+  const { report, flagged } = sepRun(
+    "run-sep",
+    [SEP_INTENT, SEP_INTENT_2, "", 'test("run then blank", () => {});'],
+    [1, 2],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1, 2]);
+  assert.equal(report.summary.annotations, 2);
+  assert.equal(report.summary.malformed, 2);
+});
+
+test("SPGD-1550: an @intent directly above its test stays green — the arm never fires on the claimed shape", () => {
+  const { report, flagged } = sepRun("direct", [SEP_INTENT, 'test("direct", () => {});'], [1]);
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+  assert.equal(report.summary.malformed, 0);
+});
+
+test("SPGD-1550: a stacked pair directly above its test gets exactly the stacked flag, not a doubled one", () => {
+  const { report, flagged } = sepRun(
+    "stacked-direct",
+    [SEP_INTENT, SEP_INTENT_2, 'test("stacked", () => {});'],
+    [1, 2],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1]);
+  assert.equal(report.summary.malformed, 1);
+});
+
+test("SPGD-1550: code interleaved between the @intent and its test is NOT flagged (out of scope)", () => {
+  const { report, flagged } = sepRun(
+    "code-between",
+    [SEP_INTENT, "", "const x = 1;", 'test("after code", () => {});'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+  assert.equal(report.summary.malformed, 0);
+});
+
+test("SPGD-1550: a describe( after the interleave is NOT flagged — the SPGD-1522 deferral stays a deferral", () => {
+  for (const between of ["", "// an ordinary note"]) {
+    const { report, flagged } = sepRun(
+      "describe-after",
+      [SEP_INTENT, between, 'describe("group", () => {', '  test("inner", () => {});', "});"],
+      [1],
+    );
+    assert.equal(report.exitCode, EXIT_OK, `interleave ${JSON.stringify(between)}`);
+    assert.deepEqual(flagged, []);
+  }
+});
+
+test("SPGD-1550: two blank lines between the @intent and its test is NOT flagged in this slice (window is exactly one line)", () => {
+  const { report, flagged } = sepRun(
+    "two-blanks",
+    [SEP_INTENT, "", "", 'test("two blanks", () => {});'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+  assert.equal(report.summary.malformed, 0);
+});
+
+test("SPGD-1550: a run followed by a blank/const with NO example after (SPGD-1521 AC4 shape) stays unflagged", () => {
+  const { report, flagged } = sepRun(
+    "no-example",
+    [SEP_INTENT, SEP_INTENT_2, "", "const x = 1;"],
+    [1, 2],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+});
+
+test("SPGD-1550: an interleave comment that itself carries an @intent token is a run member, not an interleave", () => {
+  // Blank-then-example after a 2-run is the flagged shape (pinned above); an
+  // @intent-bearing "comment" joins the run instead, so this is the stacked
+  // arm's verdict — one stacked flag on line 1, nothing from the separated arm.
+  const { flagged } = sepRun(
+    "intent-comment",
+    [SEP_INTENT, SEP_INTENT_2, 'test("stacked", () => {});'],
+    [1, 2],
+  );
+  assert.deepEqual(flagged, [1]);
+});
+
+test("SPGD-1550: a single CODE line between the @intent and its test is NOT flagged — only blank/ordinary-comment interleaves are", () => {
+  for (const between of ["const x = 1;", "  helper();", "/* block */"]) {
+    const { report, flagged } = sepRun(
+      "code-single",
+      [SEP_INTENT, between, 'test("after one code line", () => {});'],
+      [1],
+    );
+    assert.equal(report.exitCode, EXIT_OK, `interleave ${JSON.stringify(between)}`);
+    assert.deepEqual(flagged, [], `interleave ${JSON.stringify(between)}`);
+    assert.equal(report.summary.malformed, 0);
+  }
+});

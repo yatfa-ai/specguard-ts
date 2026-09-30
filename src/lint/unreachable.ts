@@ -36,6 +36,20 @@ import type { LintFinding } from "./lint.js";
  * its own test is exempt — there the annotation belongs to the test on the
  * same line.
  *
+ * The SEPARATED arm (SPGD-1550) is a third way to be dead, with no Ruby
+ * twin yet: a comment-form `@intent:` run whose last line is separated from
+ * its example by exactly ONE intervening line — a blank, or an ordinary
+ * comment without an `@intent:` token. The one-line lookback claims only the
+ * line directly above the example, so the annotation is discarded at
+ * extraction while linting clean (a note inserted under the annotation, or a
+ * formatter adding a blank, is how the shape is born). The rule: for each
+ * maximal run of comment-form `@intent:` lines ending at L, flag EVERY line
+ * of the run when `lines[L+1]` is blank or a non-`@intent` comment AND
+ * `lines[L+2]` is an example line. The stacked arm requires an example at
+ * the run's end and this one requires a blank/comment there, so the arms
+ * are mutually exclusive by construction. Code between, longer gaps, and a
+ * `describe(` beneath (SPGD-1522's deferral) are out of scope.
+ *
  * Known heuristic limits, mirrored honestly from the Ruby twin's comments
  * (scanner.rb ~:407-446): the group selector keys on the keyword at line
  * start, the payload opener must be `{` (marker-based extraction, SPGD-8
@@ -85,6 +99,22 @@ const UNREACHABLE_GROUP_ANNOTATION =
   "and annotations attach to tests, never to groups (SPGD-12 §2) — extraction is " +
   "one-line and example-anchored, so no test below can ever claim it. Move the payload " +
   "onto the test's own line, or to a `// @intent:` comment line directly above the test";
+
+/** Why a separated annotation fails: one intervening blank/comment line puts
+ * the example out of the one-line lookback's reach. */
+const UNREACHABLE_SEPARATED_ANNOTATION =
+  "unreachable annotation: this @intent: is separated from its test by an intervening " +
+  "comment or blank line, and the one-line lookback claims only the line directly above " +
+  "the test — this annotation is discarded at extraction (SPGD-12 §2). Move it to " +
+  "directly above the test (or merge it into the line that is)";
+
+/** A blank (whitespace-only) line — one of the two interleaves the separated arm reads. */
+const BLANK_LINE = /^\s*$/;
+
+/** A comment-only line (`//`-leading) — the TS analogue of annotate.ts's
+ * `COMMENT_ONLY_LINE`; the separated arm reads it only when it carries no
+ * `@intent:` token. */
+const COMMENT_ONLY_LINE = /^\s*\/\//;
 
 /**
  * The group-keyword analogue of the Ruby twin's `GROUP_LINE` (scanner.rb
@@ -181,6 +211,55 @@ export function stackedFindingsInText(text: string, file: string): LintFinding[]
 }
 
 /**
+ * The separated findings for one file's source text, in line order: EVERY
+ * line of a comment-form `@intent:` run (nothing in it is claimed) whose
+ * following line is blank or a non-`@intent` comment and whose line after
+ * that is an example line.
+ */
+export function separatedFindingsInText(text: string, file: string): LintFinding[] {
+  const lines = text.split("\n");
+  const findings: LintFinding[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    if (!COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+      continue;
+    }
+
+    const runStart = i;
+    i += 1;
+    while (i < lines.length && COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+    }
+    const runEnd = i; // exclusive; lines[runEnd] is the interleave candidate
+
+    const between = lines[runEnd];
+    const example = lines[runEnd + 1];
+    if (
+      between !== undefined &&
+      example !== undefined &&
+      (BLANK_LINE.test(between) || (COMMENT_ONLY_LINE.test(between) && !COMMENT_INTENT_LINE.test(between))) &&
+      EXAMPLE_LINE.test(example)
+    ) {
+      for (let j = runStart; j < runEnd; j += 1) {
+        findings.push({
+          file,
+          line: j + 1,
+          kind: "unreachable",
+          ok: false,
+          errors: [UNREACHABLE_SEPARATED_ANNOTATION],
+          intent: null,
+          aboutFile: false,
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
  * The group-line findings for one file's source text, in line order: one per
  * describe/suite/context GROUP line carrying a trailing `@intent:` payload
  * (INTENT_WITH_PAYLOAD), for lines that define no example of their own
@@ -238,14 +317,20 @@ export function unreachableFindings(files: string[]): LintFinding[] {
     }
     if (buf.byteLength > SCAN_MAX_BYTES) continue;
     const text = buf.toString("utf8");
-    // Ruby parity (scanner.rb `unreachable_findings_in_text`): the two arms
-    // are disjoint by construction — the stacked pass reads only `//`-leading
-    // comment lines, the group pass only lines that are not — so the merge
-    // cannot double-flag a line, and the per-file sort restores the
+    // Ruby parity (scanner.rb `unreachable_findings_in_text`, two arms; the
+    // separated arm is TS-first, SPGD-1550): the arms are disjoint by
+    // construction — the stacked pass reads only `//`-leading comment lines
+    // and needs an example at the run's end, the separated pass reads the
+    // same lines but needs a blank/comment there, the group pass only lines
+    // that are not `//`-leading — so the merge cannot double-flag a line, and the per-file sort restores the
     // file-then-line order `unreachableFindings` promises. (`?? 0` is a type
     // accommodation only — ValidatorFinding.line is nullable for binary rows,
-    // but both arms above always emit a 1-based line.)
-    const perFile = [...stackedFindingsInText(text, file), ...groupLineFindingsInText(text, file)];
+    // but every arm above always emits a 1-based line.)
+    const perFile = [
+      ...stackedFindingsInText(text, file),
+      ...separatedFindingsInText(text, file),
+      ...groupLineFindingsInText(text, file),
+    ];
     perFile.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
     findings.push(...perFile);
   }

@@ -30,7 +30,9 @@ import { unreachableFindings } from "./unreachable.js";
  *      unreachable (stacked above another comment-form `@intent` line, so
  *      the one-line lookback never claims it, or trailing on a
  *      describe/suite/context group line, which no lookback can ever
- *      claim; the structural pass, unreachable.ts). The ONLY code produced
+ *      claim, or separated from its test by one intervening comment or
+ *      blank line, so the lookback never reaches it; the structural
+ *      pass, unreachable.ts). The ONLY code produced
  *      by inspecting content, reached in exactly one place below;
  *   2  the linter could not do its job — misuse, an unresolvable/broken
  *      binary when annotations DID exist to validate, or a backend failure.
