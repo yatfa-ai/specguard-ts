@@ -579,6 +579,38 @@ test("an @intent: trailing on a describe group line exits 1 — the line is unre
   );
 });
 
+test("an @intent: trailing on a suite/context group line is unreachable — GROUP_LINE's other keywords", () => {
+  // GROUP_LINE declares THREE group keywords (describe/suite/context) and the
+  // docblock names all three (`describe.only(`, `suite.skip(`,
+  // `context.todo(`); this pin drives the two the other fixtures in this
+  // block never touch, mirroring the Ruby twin's every-keyword pin
+  // (unreachable_spec.rb, "flags the trailing form on every example-group
+  // keyword"). Fixtures are regex-scanned only, never executed, so the
+  // suite(/context( text needs no valid import line.
+  for (const keyword of ["suite", "context"]) {
+    const f = makeRepo({
+      "group.test.js": [
+        'import { test } from "node:test";',
+        "",
+        GROUP_INTENT.replace("describe(", `${keyword}(`),
+        '  test("adds", () => {});',
+        "});",
+      ].join("\n") + "\n",
+    });
+    const binary = stubBackend(
+      [{ file: "group.test.js", line: 3, kind: null, ok: true, errors: [] }],
+      1,
+    );
+    const report = inRepo(f, ["group.test.js"], binary);
+    const unreachable = report.findings.filter((x) => x.kind === "unreachable");
+    assert.equal(unreachable.length, 1, `${keyword} produced ${unreachable.length} findings`);
+    assert.equal(unreachable[0]?.file, "group.test.js");
+    assert.equal(unreachable[0]?.line, 3);
+    assert.equal(unreachable[0]?.ok, false);
+    assert.equal(report.exitCode, EXIT_MALFORMED);
+  }
+});
+
 test("a group-line finding counts in malformed but never inflates summary.annotations", () => {
   // Same fixture as the pin above: the binary saw and validated the ONE
   // annotation (the group-line payload is dead at EXTRACTION, not at
