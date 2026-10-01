@@ -223,10 +223,31 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
   // normalization deliberately does NOT move into `selectFiles` itself:
   // that function is shared with src/node-test/annotate.ts, which passes
   // its own root and joins finding keys against the absolute form.
+  // SPGD-1539: the rebuilt register is also SEPARATOR-folded, because
+  // root-relative is only half the register — the other half is posix
+  // separators, the contract this repo states in its own words at
+  // src/node-test/annotate.ts:79 ("Mirror the collector's path
+  // normalization: repo-relative, posix separators") and which the three
+  // collectors' `relativize` and `normalizeRepoPath` all already fold to via
+  // `split(sep).join("/")`. Without the fold, win32 `specguard lint` reports
+  // `src\deep\a.test.ts` for the file every collector and the annotate
+  // warnings name `src/deep/a.test.ts` — and the register is a JOIN KEY
+  // inside lint, not only display (the coverage note's set-difference below,
+  // the unreachable rows' inherited `file`, and both renderers plus --json
+  // copy it verbatim). The fold is identity where `path.sep === "/"`, so
+  // POSIX behavior is byte-unchanged. Folding the WHOLE mapped value is safe
+  // here — unlike discover.ts's `--changed` arm, whose `relative` local is
+  // shared with two separator-sensitive guards — because `walk()` is seeded
+  // with the root and pushes only `path.join(dir, entry.name)`
+  // (discover.ts:241-257), so no walk file is outside the root and there is
+  // no `..` escape to preserve, and the mapped value has exactly one
+  // consumer.
   if (selection.mode === "walk") {
     selection = {
       ...selection,
-      files: selection.files.map((file) => path.relative(process.cwd(), file)),
+      files: selection.files.map((file) =>
+        path.relative(process.cwd(), file).split(path.sep).join("/"),
+      ),
     };
   }
 

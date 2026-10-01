@@ -2929,3 +2929,149 @@ test("SPGD-1556: linting annotated-same-line.test.js's text flags exactly line 1
   assert.deepEqual(flagged, [13]);
   assert.equal(report.exitCode, EXIT_MALFORMED);
 });
+
+// --- SPGD-1539: the lint-side registers are POSIX-separated ----------------
+//
+// The repo builds a repo-relative path register in SIX places. The four
+// telemetry-side ones (the three collectors' `relativize`, annotate.ts's
+// `normalizeRepoPath`) fold `path.sep` → `/`; the two LINT-side ones did not
+// — `lint.ts`'s walk-arm rebuild and `discover.ts`'s `--changed` push. On
+// win32 `specguard lint` therefore named `src\deep\a.test.ts` for the file
+// every collector and every annotate warning names `src/deep/a.test.ts`,
+// re-opening the one-file-two-spellings divergence SPGD-1011 → 1026 → 1533
+// → 1537 closed. The contract is stated in the repo's own words at
+// src/node-test/annotate.ts:79: "repo-relative, posix separators".
+//
+// WHY THESE PINS ARE NOT `{ skip: process.platform === "win32" ? … }`, the
+// idiom test/annotate.test.ts:682/:786 uses. That idiom is correct THERE and
+// would be inert HERE, and the difference is the fixture's premise. Those
+// pins feed a BACKSLASH LITERAL to `normalizeRepoPath`; on POSIX a backslash
+// is a legal filename character that node:path leaves verbatim, so the
+// fixture's premise is false off win32 and a skip is the honest answer. The
+// premise here is not a literal — it is `path.sep`/`path.relative` SEMANTICS,
+// and `node:path` ships both platforms' implementations on every platform
+// (`path.win32`). Both production sites reach the separator through the
+// mutable `path` namespace (`import path from "node:path"`), so injecting
+// `path.win32`'s `sep`/`relative` for the duration of one example gives
+// GENUINE win32 separator semantics on a Linux runner.
+//
+// That matters for more than tidiness: a platform-gated pin is a permanent
+// skip on this repo's CI (.github/workflows/ci.yml is `runs-on:
+// ubuntu-latest`, matrix over Node only — never the OS), so it could never
+// go red for the revert attributions these pins exist to provide. Injected,
+// each one is a real red/green instrument on every platform. Only `sep` and
+// `relative` are swapped — deliberately NOT `join`/`isAbsolute`/`resolve`,
+// which the same code paths use to touch the REAL filesystem: a win32 `join`
+// would mint `\tmp\…` and the fixture files would stop existing, turning a
+// register assertion into an unreadable-file assertion.
+function withWin32Separators<T>(fn: () => T): T {
+  const savedSep = path.sep;
+  const savedRelative = path.relative;
+  (path as unknown as { sep: string }).sep = path.win32.sep;
+  (path as unknown as { relative: typeof path.relative }).relative = path.win32.relative;
+  try {
+    return fn();
+  } finally {
+    (path as unknown as { sep: string }).sep = savedSep;
+    (path as unknown as { relative: typeof path.relative }).relative = savedRelative;
+  }
+}
+
+test("SPGD-1539 (AC1): the walk register is posix-separated under win32 separator semantics", () => {
+  // Nested fixture, mandatory: a root-level file has no directory component,
+  // so a register assertion and a basename assertion would have identical
+  // truth values and the pin could not discriminate (the SPGD-1537
+  // measurement). `src/deep/a.test.ts` can only be satisfied by genuine
+  // relativization AND a genuine separator fold.
+  const f = makeRepo({ "src/deep/a.test.ts": GOOD_ANNOTATION });
+  // The echo stub mirrors what it was HANDED — each --source pattern becomes
+  // a finding naming that pattern verbatim — so the finding below reads the
+  // register lint actually built, not a stub-fabricated name (the
+  // SPGD-1533 discipline at test/lint.test.ts:330-334).
+  const binary = echoingBackend(1);
+  const report = withWin32Separators(() => inRepo(f, [], binary)); // bare walk
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  // Literal, un-normalized: exactly the string `normalizeRepoPath` yields for
+  // the same input, and the same string every collector's `relativize`
+  // yields. Un-patched `path.relative` here would make the pin blind to the
+  // separator, which is the whole claim.
+  assert.deepEqual(report.findings.map((x) => x.file), ["src/deep/a.test.ts"]);
+  const human = renderHuman(report);
+  assert.match(human, /FAIL src\/deep\/a\.test\.ts:1 \(schema\)/);
+  assert.ok(!human.includes("\\"), `backslash separator leaked into the report: ${human}`);
+  // The register is a JOIN KEY inside lint, not only display: `--json` copies
+  // finding.file verbatim, so a win32 consumer must see the same key every
+  // telemetry surface uses.
+  const json = JSON.parse(renderJson(report)) as { findings: { file: string }[] };
+  assert.deepEqual(json.findings.map((x) => x.file), ["src/deep/a.test.ts"]);
+});
+
+test("SPGD-1539 (AC2): the --changed register is posix-separated under win32 separator semantics", () => {
+  const f = initRepo({ "src/keep.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.mkdirSync(path.join(f.root, "src/deep"), { recursive: true });
+  fs.writeFileSync(path.join(f.root, "src/deep/a.test.ts"), GOOD_ANNOTATION);
+  commitAll(f, "feature change");
+
+  // Unit-level on the pushed value at discover.ts:363 — deliberately not via
+  // lint(), so this pin names the producer and not a downstream renderer.
+  const selection = withWin32Separators(() => selectFiles([], f.root, { changed: true }));
+  assert.equal(selection.mode, "changed");
+  assert.deepEqual(selection.files, ["src/deep/a.test.ts"]); // nested, literal
+  assert.ok(
+    !selection.files.some((file) => file.includes("\\")),
+    `backslash separator leaked into the register: ${JSON.stringify(selection.files)}`,
+  );
+});
+
+test("SPGD-1539 (AC3a): the out-of-root guard still fires — the fold is on the PUSHED value, not the shared local", () => {
+  // discover.ts:341's `relative` local feeds THREE consumers and only the
+  // push may see a folded value: the `outside` guard tests `..${path.sep}`,
+  // so a folded local yields `../…` on win32, which that guard does not
+  // match — admitting an out-of-root file into the selection instead of
+  // counting it in `outsideRoot`. This pin is that regression's only
+  // defence; it is invisible on unpatched POSIX.
+  const f = initRepo({
+    "packages/app/src/deep/a.test.ts": GOOD_ANNOTATION,
+    "packages/other/src/deep/out.test.ts": GOOD_ANNOTATION,
+  });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  fs.writeFileSync(path.join(f.root, "packages/app/src/deep/a.test.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  fs.writeFileSync(path.join(f.root, "packages/other/src/deep/out.test.ts"), GOOD_ANNOTATION + "\n// touched\n");
+  commitAll(f, "feature change");
+
+  const selection = withWin32Separators(() =>
+    selectFiles([], path.join(f.root, "packages/app"), { changed: true }),
+  );
+  assert.equal(selection.stats?.outsideRoot, 1); // counted, not selected
+  assert.deepEqual(selection.files, ["src/deep/a.test.ts"]);
+  assert.ok(
+    !selection.files.some((file) => file.includes("..")),
+    `an out-of-root escape entered the register: ${JSON.stringify(selection.files)}`,
+  );
+});
+
+test("SPGD-1539 (AC3b): the SKIPPED_DIRECTORIES fence still fires — the fold is on the PUSHED value, not the shared local", () => {
+  // `skippedDirectory` splits on `path.sep`, so a folded local yields ZERO
+  // segments on win32 and the fence is dead: every vendored/built file under
+  // node_modules, .git, dist, .test-build or coverage would be selected.
+  // Nested under the fenced segment, so the discrimination is real.
+  const f = initRepo({ "src/keep.ts": GOOD_ANNOTATION });
+  commitAll(f, "base");
+  git(f.root, "checkout", "-b", "feature");
+  for (const rel of ["src/deep/a.test.ts", "dist/deep/built.test.ts"]) {
+    fs.mkdirSync(path.dirname(path.join(f.root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(f.root, rel), GOOD_ANNOTATION);
+  }
+  commitAll(f, "feature change");
+
+  const selection = withWin32Separators(() => selectFiles([], f.root, { changed: true }));
+  assert.equal(selection.skipped, 1); // counted and disclosed, not selected
+  assert.deepEqual(selection.files, ["src/deep/a.test.ts"]);
+  assert.ok(
+    !selection.files.some((file) => file.startsWith("dist/") || file.startsWith("dist\\")),
+    `the SKIPPED_DIRECTORIES fence let a built file through: ${JSON.stringify(selection.files)}`,
+  );
+});
