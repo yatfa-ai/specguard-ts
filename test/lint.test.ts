@@ -2930,6 +2930,25 @@ test("SPGD-1556: linting annotated-same-line.test.js's text flags exactly line 1
   assert.equal(report.exitCode, EXIT_MALFORMED);
 });
 
+test("SPGD-1564: the shadow scan covers the WHOLE file — two independent runs yield one finding each, not just the first", () => {
+  const { report, flagged } = sepRun(
+    "shadow-two-runs",
+    [SEP_INTENT, SHADOW_ONE_LINER, "const gap = 1;", SEP_INTENT_2, SHADOW_ONE_LINER],
+    [1, 2, 4, 5],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1, 4]);
+  assert.equal(report.summary.malformed, 2);
+});
+
+test("SPGD-1564: a comment run above a describe group line with a trailing payload is the GROUP arm's one finding, not also the shadow arm's", () => {
+  const groupLine = `describe("g", () => { ${SHADOW_TRAIL}`;
+  const { report, flagged } = sepRun("shadow-group-below", [SEP_INTENT, groupLine], [1, 2]);
+  assert.deepEqual(flagged, [2]);
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(ownLineShadowFindingsInText([SEP_INTENT, groupLine, ""].join("\n"), "f.test.js"), []);
+});
+
 // --- SPGD-1539: the lint-side registers are POSIX-separated ----------------
 //
 // The repo builds a repo-relative path register in SIX places. The four
