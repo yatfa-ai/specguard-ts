@@ -69,6 +69,12 @@ import type { LintFinding } from "./lint.js";
  * right after the run and this one requires the example there, so those two
  * are disjoint by construction as well.
  *
+ * What counts as an "example line" in every arm above is ONE recognition
+ * rule (EXAMPLE_CALL_SOURCE), not an enumerated list: a call head
+ * (`it`/`test`/`specify`/`xit`/`fit`/`xtest`) plus any modifier chain, so the
+ * three example-anchored arms and the group arm's one-liner exemption cannot
+ * drift apart (SPGD-1568).
+ *
  * Known heuristic limits, mirrored honestly from the Ruby twin's comments
  * (scanner.rb `GROUP_LINE` / `INTENT_WITH_PAYLOAD` / `EXAMPLE_ON_LINE`): the group selector keys on the keyword at line
  * start, the payload opener must be `{` (marker-based extraction, SPGD-8
@@ -91,12 +97,46 @@ import type { LintFinding } from "./lint.js";
 const COMMENT_INTENT_LINE = /^\s*\/\/.*@intent:/;
 
 /**
- * The line an annotation run may be claimed from: the first example keyword.
- * The TS analogue of the Ruby twin's `EXAMPLE_LINE` — `it`/`test`/`specify`
- * at the start of a line, with the runner modifiers that still open an
- * example (`it.only(`, `test.skip(`, `test.todo(`).
+ * ONE shared source for "this text opens an example call" — the anchor for
+ * the stacked / separated / own-line-shadow arms (`EXAMPLE_LINE`) AND the
+ * group arm's one-liner exemption (`EXAMPLE_ON_LINE`) are both built from it,
+ * so the two can never drift (SPGD-1568: they did, and the narrow vocabulary
+ * false-greened the first three arms and false-redded the fourth).
+ *
+ * The RULE, not a list: a call head — `it`, `test`, `specify`, or the Jest
+ * aliases `xit`, `fit`, `xtest` — that is not the prefix of a longer
+ * identifier (`item(`, `testing(`, `itinerary(` are not examples), followed by
+ * any chain of `.identifier` segments, each optionally carrying its own
+ * parenthesised arguments or a tagged template (`.each([1])`, `.skipIf(c)`,
+ * `.each\`a|b\``), up to the call paren itself. So `it.only(`,
+ * `it.concurrent(`, `it.skip.each([1])(`, `test.concurrent.only(` and
+ * `it.runIf(c)(` all open an example without anyone enumerating them. A
+ * chain whose tagged template is still open at the end of the line
+ * (`test.each\``, the multi-line table form) opens one too. Parenthesised
+ * arguments are balanced to a bounded depth (CALL_ARGS_DEPTH); a deeper
+ * nesting on the head line is not recognised — a missed flag, never a false
+ * one. Group keywords stay `GROUP_LINE`'s: `describe|suite|context` are not
+ * heads here.
  */
-const EXAMPLE_LINE = /^\s*(?:it|test|specify)(?:\.(?:only|skip|todo))?\s*\(/;
+const CALL_ARGS_DEPTH = 4;
+const CALL_ARGS = (() => {
+  let inner = "[^()]";
+  for (let d = 0; d < CALL_ARGS_DEPTH; d += 1) inner = `(?:[^()]|\\(${inner}*\\))`;
+  return `\\(${inner}*\\)`;
+})();
+const CALL_TEMPLATE = "`[^`]*`";
+const CALL_SEGMENT = `\\.[A-Za-z_$][\\w$]*(?:${CALL_ARGS}|${CALL_TEMPLATE})?`;
+const CALL_HEAD = "(?:it|test|specify|xit|fit|xtest)(?![\\w$])";
+const EXAMPLE_CALL_SOURCE =
+  `${CALL_HEAD}(?:(?:${CALL_SEGMENT})*\\s*\\(|(?:${CALL_SEGMENT})+\\s*\`[^\`]*$)`;
+
+/**
+ * The line an annotation run may be claimed from: an example call at the
+ * start of a line. The TS analogue of the Ruby twin's `EXAMPLE_LINE`; the
+ * call vocabulary is EXAMPLE_CALL_SOURCE's rule (runner modifiers, `.each`
+ * tables, `.skipIf(c)` conditionals, `xit`/`fit` aliases).
+ */
+const EXAMPLE_LINE = new RegExp(`^\\s*${EXAMPLE_CALL_SOURCE}`);
 
 /** Why a stacked line fails: the lookback claims only the line directly
  * above the example, so this one is discarded at extraction. The remedy is
@@ -194,7 +234,7 @@ const INTENT_WITH_PAYLOAD = /@intent:\s*\{/;
  * never a real example OFF. The one-line example's own payload is never
  * consulted, so a payload can never exempt anything.
  */
-const EXAMPLE_ON_LINE = /(?:\{|;)\s*(?:it|test|specify)(?:\.(?:only|skip|todo))?\s*\(/;
+const EXAMPLE_ON_LINE = new RegExp(`(?:\\{|;)\\s*${EXAMPLE_CALL_SOURCE}`);
 
 /**
  * The stacked findings for one file's source text, in line order: one per
