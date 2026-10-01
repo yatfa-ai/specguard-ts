@@ -31,7 +31,10 @@ import { unreachableFindings } from "./unreachable.js";
  *      the one-line lookback never claims it, or trailing on a
  *      describe/suite/context group line, which no lookback can ever
  *      claim, or separated from its test by one intervening comment or
- *      blank line, so the lookback never reaches it; the structural
+ *      blank line, so the lookback never reaches it, or a comment-form
+ *      `@intent` directly above a test that carries its own trailing
+ *      `@intent:`, where own-line-first extraction discards the comment
+ *      above; the structural
  *      pass, unreachable.ts). The ONLY code produced
  *      by inspecting content, reached in exactly one place below;
  *   2  the linter could not do its job — misuse, an unresolvable/broken
@@ -406,11 +409,15 @@ export function lint(argv: string[], options: LintOptions = {}): LintReport {
 
   const findings: LintFinding[] = raw.map((f) => ({ ...f, aboutFile: aboutFile(f.kind) }));
   // SPGD-1521/1524: the structural pass — well-formed annotations that can
-  // never be extracted. Two arms: a run of ≥2 consecutive comment-form
+  // never be extracted. Four arms: (1) a run of ≥2 consecutive comment-form
   // `@intent` lines immediately above an example leaves every line of the
   // run but the LAST dead (the one-line lookback, SPGD-12 §2, claims only
-  // the line directly above the example), and an `@intent:` trailing on a
-  // describe/suite/context group line is claimed by no lookback at all.
+  // the line directly above the example); (2) an `@intent:` trailing on a
+  // describe/suite/context group line is claimed by no lookback at all;
+  // (3) a run separated from its example by one blank/comment line is never
+  // reached by the lookback; (4) a comment-form `@intent` directly above an
+  // example with its own trailing `@intent:` loses to own-line-first
+  // extraction.
   // These become findings like any other, appended here —
   // before `malformed` is computed and before the `unreadable` exit-2 return
   // — so the exit code, both renderers and the unread arm all see them with

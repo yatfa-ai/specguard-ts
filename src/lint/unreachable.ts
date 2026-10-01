@@ -36,8 +36,9 @@ import type { LintFinding } from "./lint.js";
  * its own test is exempt — there the annotation belongs to the test on the
  * same line.
  *
- * The SEPARATED arm (SPGD-1550) is a third way to be dead, with no Ruby
- * twin yet: a comment-form `@intent:` run whose last line is separated from
+ * The SEPARATED arm (SPGD-1550) is a third way to be dead (originated in TS,
+ * since mirrored in specguard-rspec `scanner.rb`
+ * `separated_findings_in_text`, SPGD-1554): a comment-form `@intent:` run whose last line is separated from
  * its example by exactly ONE intervening line — a blank, or an ordinary
  * comment without an `@intent:` token. The one-line lookback claims only the
  * line directly above the example, so the annotation is discarded at
@@ -50,8 +51,9 @@ import type { LintFinding } from "./lint.js";
  * are mutually exclusive by construction. Code between, longer gaps, and a
  * `describe(` beneath (SPGD-1522's deferral) are out of scope.
  *
- * The OWN-LINE-SHADOW arm (SPGD-1556) is a fourth way to be dead, also with
- * no Ruby twin yet: a comment-form `@intent:` run directly above an example
+ * The OWN-LINE-SHADOW arm (SPGD-1556) is a fourth way to be dead (also
+ * originally TS-only, since mirrored in specguard-rspec `scanner.rb`
+ * `own_line_shadow_findings_in_text`, SPGD-1560): a comment-form `@intent:` run directly above an example
  * line that ALSO carries its own trailing `@intent: {…}` payload. Extraction
  * is own-line-first (annotate.ts ARM 1 returns the row's own annotation
  * before ARM 2, the comment-above lookback, is consulted), so the comment
@@ -68,7 +70,7 @@ import type { LintFinding } from "./lint.js";
  * are disjoint by construction as well.
  *
  * Known heuristic limits, mirrored honestly from the Ruby twin's comments
- * (scanner.rb ~:407-446): the group selector keys on the keyword at line
+ * (scanner.rb `GROUP_LINE` / `INTENT_WITH_PAYLOAD` / `EXAMPLE_ON_LINE`): the group selector keys on the keyword at line
  * start, the payload opener must be `{` (marker-based extraction, SPGD-8
  * §7, also finds the token inside quoted strings — this suite's own
  * description "unreachable stacked @intent: annotations" is prose, not an
@@ -155,7 +157,7 @@ const GROUP_LINE = /^\s*(?:describe|suite|context)(?:\.(?:only|skip|todo|concurr
 
 /**
  * A token WITH its payload opener, the TS analogue of the Ruby twin's
- * `INTENT_WITH_PAYLOAD` (scanner.rb ~:424). The `{` is load-bearing:
+ * `INTENT_WITH_PAYLOAD` (scanner.rb). The `{` is load-bearing:
  * extraction is marker-based (SPGD-8 §7), so the token is ALSO found
  * inside quoted strings — this repo's own suite carries
  * `describe("unreachable stacked @intent: annotations", ...)`, which is
@@ -172,7 +174,7 @@ const INTENT_WITH_PAYLOAD = /@intent:\s*\{/;
 
 /**
  * The one-liner exemption, the TS analogue of the Ruby twin's
- * `EXAMPLE_ON_LINE` (scanner.rb ~:446): a group line that ALSO opens an
+ * `EXAMPLE_ON_LINE` (scanner.rb): a group line that ALSO opens an
  * example on the same line is that example's own line, so its trailing
  * annotation is claimed by the example and must not be flagged:
  *
@@ -384,8 +386,9 @@ export function unreachableFindings(files: string[]): LintFinding[] {
     }
     if (buf.byteLength > SCAN_MAX_BYTES) continue;
     const text = buf.toString("utf8");
-    // Ruby parity (scanner.rb `unreachable_findings_in_text`, two arms; the
-    // separated and own-line-shadow arms are TS-first, SPGD-1550/1556): the
+    // Ruby parity (scanner.rb `unreachable_findings_in_text`, four arms, all
+    // mirrored in Ruby; the separated and own-line-shadow arms originated in
+    // TS, SPGD-1550/1556, mirrored in SPGD-1554/1560): the
     // arms are disjoint by construction — the stacked pass reads only
     // `//`-leading comment lines and needs an example at the run's end
     // (flagging all but the run's last line), the own-line-shadow pass reads
