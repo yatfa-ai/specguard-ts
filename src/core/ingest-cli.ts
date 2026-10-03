@@ -2,7 +2,7 @@ import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from "node
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
-import { deliverRawLine, version } from "./transport.js";
+import { deliverRawLine, describeHttpFailure, version } from "./transport.js";
 import { renderDelivery, renderListing } from "./ingest-reporter.js";
 
 /**
@@ -822,7 +822,7 @@ async function deliverLine(
     };
   }
   if (raw.outcome === "http-error") {
-    const detail = raw.detail === "" ? `HTTP ${raw.status}` : `HTTP ${raw.status} — ${raw.detail}`;
+    const detail = describeHttpFailure(raw.status, raw.detail, raw.reasons);
     return {
       number,
       status: CONTENT_REFUSAL_CODES.includes(raw.status) ? "refused" : "undelivered",

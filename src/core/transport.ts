@@ -87,6 +87,57 @@ export function refusalReasons(bodyText: string): string[] | null {
 }
 
 /**
+ * What an HTTP status MEANS to the person reading the line — ported verbatim
+ * from the Ruby transport's `ADVICE` (`lib/specguard/rspec/transport.rb`),
+ * entries and values included. A status with no entry (500, and every other
+ * code) carries no advice clause; inventing one is a separate decision.
+ */
+export const ADVICE: Readonly<Record<number, string>> = {
+  400: "the endpoint rejected the payload",
+  401: "the API key was not accepted",
+  403: "this API key may not write to that repository",
+  404: "no ingest endpoint at that URL — check SPECGUARD_ENDPOINT",
+  413: "the payload was too large for the endpoint",
+  429: "rate limited by the endpoint",
+};
+
+/**
+ * Compose the delivery-failure diagnostic: `HTTP <status>` · advice · detail,
+ * absent clauses dropped (Ruby's `[...].compact.join(" — ")`).
+ *
+ * When the status has an ADVICE entry, the raw `detail` is kept ONLY if the
+ * body parsed as a SpecGuard refusal (`reasons` non-null — the caller's
+ * `refusalReasons(body)`). That is the Ruby reference's own behaviour: its
+ * third clause is the JSON-only `rendered_reasons`, so a body it cannot
+ * understand (a proxy's HTML 404, a bare string) is dropped rather than
+ * printed. A status with no advice composes exactly as before, body and all.
+ *
+ * One-reason refusals render that reason itself rather than the JSON around it.
+ *
+ * `reasons` is passed in rather than re-derived from `detail`: `detail` is
+ * already flattened and capped at 300 chars, and a truncated JSON body no
+ * longer parses.
+ */
+export function describeHttpFailure(
+  status: number,
+  detail: string,
+  reasons: string[] | null,
+): string {
+  const advice = ADVICE[status];
+  let detailClause = detail;
+  if (advice !== undefined) {
+    if (reasons === null) detailClause = "";
+    // A refusal that names ONE reason is the platform's own sentence — the
+    // Ruby reference renders that sentence, not the JSON envelope around it
+    // (`HTTP 401 — the API key was not accepted — A valid Bearer API key is
+    // required.`). A multi-spec refusal keeps the flattened, capped body: its
+    // whole list rides the `--json` document's `reasons`, not this line.
+    else if (reasons.length === 1) detailClause = oneLine(reasons[0] as string);
+  }
+  return [`HTTP ${status}`, advice, detailClause].filter((c) => c !== undefined && c !== "").join(" — ");
+}
+
+/**
  * Deliver one envelope to `<endpoint>/api/v1/ingest`.
  *
  * NEVER THROWS. This is the roadmap's hardest constraint and it outranks
@@ -135,13 +186,16 @@ export async function deliver(
     // load-bearing line; without it a refused delivery disappears silently.
     if (!res.ok) {
       let detail = "";
+      let reasons: string[] | null = null;
       try {
-        detail = oneLine(await res.text());
+        const body = await res.text();
+        detail = oneLine(body);
+        reasons = refusalReasons(body);
       } catch {
         detail = "";
       }
       return fallBackToQueue(
-        `SpecGuard: could not deliver test telemetry (HTTP ${res.status}${detail === "" ? "" : ` — ${detail}`})`,
+        `SpecGuard: could not deliver test telemetry (${describeHttpFailure(res.status, detail, reasons)})`,
         append,
         warn,
         env,

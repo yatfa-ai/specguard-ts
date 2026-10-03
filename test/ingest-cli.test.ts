@@ -1025,7 +1025,19 @@ test("exit 1 is ONLY the endpoint's content verdict: a 400 refuses, a 401/429/50
       const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
       const r = await runCli([file], srv.url);
       assert.equal(r.code, 2, `a ${status} is the tool's problem, never the run's`);
-      assert.match(r.stdout, new RegExp(`line 1: not delivered — HTTP ${status} — boom`));
+      // 401/429 carry an ADVICE entry and `boom` is not a SpecGuard refusal
+      // body, so it is dropped (advice-only, as the Ruby reference composes);
+      // 500 has no entry and keeps its body byte-identically — the gate is the
+      // advice clause, not the body.
+      const expected: Record<number, string> = {
+        401: "HTTP 401 — the API key was not accepted",
+        429: "HTTP 429 — rate limited by the endpoint",
+        500: "HTTP 500 — boom",
+      };
+      assert.ok(
+        r.stdout.split("\n").includes(`line 1: not delivered — ${expected[status]}`),
+        `${status}: ${r.stdout}`,
+      );
       assert.match(r.stdout, /delivered 0 of 1 run from /);
       rm(file);
     } finally {
@@ -1038,7 +1050,7 @@ test("exit 1 is ONLY the endpoint's content verdict: a 400 refuses, a 401/429/50
     const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
     const r = await runCli([file], srv.url);
     assert.equal(r.code, 1, "a 400 is the one permanent content verdict");
-    assert.match(r.stdout, /line 1: refused — HTTP 400 — specs is required and must be an array/);
+    assert.match(r.stdout, /^line 1: refused — HTTP 400 — the endpoint rejected the payload$/m);
     assert.match(r.stdout, /1 refused/);
     rm(file);
   } finally {
@@ -1058,8 +1070,8 @@ test("a mixed file: 2 dominates 1 — the undelivered line is the fact that leav
     const r = await runCli([file], srv.url);
     assert.equal(r.code, 2);
     assert.match(r.stdout, /line 1: accepted/);
-    assert.match(r.stdout, /line 2: refused — HTTP 400 — nope/);
-    assert.match(r.stdout, /line 3: not delivered — HTTP 401 — unauthorized/);
+    assert.match(r.stdout, /^line 2: refused — HTTP 400 — the endpoint rejected the payload$/m);
+    assert.match(r.stdout, /^line 3: not delivered — HTTP 401 — the API key was not accepted$/m);
     assert.match(r.stdout, /delivered 1 of 3 runs from .*; 1 refused; 1 could not be delivered/);
     rm(file);
   } finally {
@@ -1391,7 +1403,7 @@ test("SPGD-1226: a 400's details array reaches the report — every spec named u
     const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
     const r = await runCli([file], srv1.url);
     assert.equal(r.code, 1);
-    assert.match(r.stdout, /line 1: refused — HTTP 400 — \{"error"/);
+    assert.match(r.stdout, /line 1: refused — HTTP 400 — the endpoint rejected the payload — \{"error"/);
     assert.ok(r.stdout.includes("specs[0]"));
     assert.ok(!r.stdout.includes("specs[24]"), "the human line has room for a fragment, not the list");
     const refusedLine = r.stdout.split("\n")[0] ?? "";
