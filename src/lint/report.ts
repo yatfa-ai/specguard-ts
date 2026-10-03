@@ -48,10 +48,19 @@ export function provenanceLine(files: number, selection: FileSelection | null): 
   // to before the fence existed — and a fence that DID remove files never
   // narrows the selection silently. The count rides `FileSelection.skipped`
   // (`discover.ts`), the same number the changed-mode empty reason reads.
+  //
+  // The two modes count different units, so they word them differently on
+  // purpose: `--changed` counts FILES ("skipping 3 in dependency or build
+  // directories"), the walk counts pruned DIRECTORIES and names its noun
+  // ("skipping 2 dependency or build directories"). One sentence must not
+  // carry two nouns, so the branch on `selection.mode` is explicit.
+  const skippedCount = selection?.skipped ?? 0;
   const skippedClause =
-    (selection?.skipped ?? 0) > 0
-      ? ` skipping ${selection?.skipped} in dependency or build directories`
-      : "";
+    skippedCount === 0
+      ? ""
+      : selection?.mode === "walk"
+        ? ` skipping ${skippedCount} dependency or build directories`
+        : ` skipping ${skippedCount} in dependency or build directories`;
   return (
     `specguard lint: checked ${files} source file${files === 1 ? "" : "s"}` +
     changedSince + untrackedClause + skippedClause
