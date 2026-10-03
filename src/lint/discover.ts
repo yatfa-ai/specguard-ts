@@ -104,13 +104,15 @@ export interface FileSelection {
   /** `changed` mode: the filter counters behind an empty selection. Null in
    * the other modes. */
   stats: ChangedStats | null;
-  /** How many matched files the `SKIPPED_DIRECTORIES` fence removed from this
-   * selection — `changed` mode's count over the diff+untracked union (see
-   * `selectChanged`). 0 in the other modes: the walk fences at the directory
-   * entry during recursion (so it never counts a file-level removal) and an
-   * explicit list is checked as given, bypassing the fence entirely. A fence
-   * that removes files must say so — this count is what the report's
-   * disclosure clause reads, so the narrowing is never silent. */
+  /** How much the `SKIPPED_DIRECTORIES` fence removed from this selection.
+   * The UNIT DIFFERS BY MODE, and the report words each accordingly:
+   * `changed` mode counts FILES (the diff+untracked union, see
+   * `selectChanged`); `walk` mode counts DIRECTORIES — each fenced directory
+   * entry the recursion pruned, counted at the prune site without descending
+   * (counting files would mean walking into `node_modules`, ~730x the cost).
+   * 0 in explicit mode, which checks the list as given and bypasses the fence
+   * entirely. A fence that removes anything must say so — this count is what
+   * the report's disclosure clause reads, so the narrowing is never silent. */
   skipped: number;
 }
 
@@ -238,6 +240,7 @@ export function selectFiles(
   if (options.changed) return selectChanged(root, options.base);
 
   const files: string[] = [];
+  let fencedDirectories = 0;
   const walk = (dir: string): void => {
     let entries: fs.Dirent[];
     try {
@@ -248,14 +251,25 @@ export function selectFiles(
     entries.sort((a, b) => (a.name < b.name ? -1 : 1));
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(path.join(dir, entry.name));
+        if (SKIPPED_DIRECTORIES.has(entry.name)) {
+          // Count the fence HERE, where it decides, and never descend to
+          // count: the unit is DIRECTORIES (one per pruned entry), not files.
+          // A file-grain count would have to walk into the fenced tree —
+          // measured ~730x costlier (38 ms vs 0.05 ms on a 32,000-file
+          // node_modules) on the one directory a linter must never walk. The
+          // report words this count as directories; `--changed` counts files
+          // and keeps its own wording (report.ts branches on selection.mode).
+          fencedDirectories += 1;
+        } else {
+          walk(path.join(dir, entry.name));
+        }
       } else if (entry.isFile() && isAnnotatedSource(entry.name)) {
         files.push(path.join(dir, entry.name));
       }
     }
   };
   walk(root);
-  return { files, mode: "walk", base: null, note: null, stats: null, skipped: 0 };
+  return { files, mode: "walk", base: null, note: null, stats: null, skipped: fencedDirectories };
 }
 
 /**

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 import { lint, EXIT_OK, EXIT_MALFORMED, EXIT_MISUSE } from "../src/lint/lint.js";
-import { renderJson, renderHuman } from "../src/lint/report.js";
+import { renderJson, renderHuman, provenanceLine } from "../src/lint/report.js";
 import { ownLineShadowFindingsInText } from "../src/lint/unreachable.js";
 import {
   selectFiles,
@@ -1783,9 +1783,80 @@ test("a zero-fence changed selection is unchanged, and the skipped count default
   assert.equal(selection.skipped, 0);
 
   // `skipped` follows the `base`/`note`/`stats` precedent: defaulted 0 at
-  // the walk and explicit sites, which never count a file-level removal.
-  assert.equal(selectFiles([], mixed.root).skipped, 0);
+  // the explicit site (an explicit list bypasses the fence by design). The
+  // walk's old `skipped: 0` pin MOVED in SPGD-1286 (it was the
+  // implementation's shadow, same commit 4273997): `initRepo` makes a `.git`
+  // directory, which the fence prunes, so the walk now counts that ONE
+  // directory. The clean-tree zero arm is pinned below on a git-less tree.
+  assert.equal(selectFiles([], mixed.root).skipped, 1);
   assert.equal(selectFiles(["src/a.ts"], mixed.root).skipped, 0);
+});
+
+// --- SPGD-1286: the walk discloses its fence -------------------------------
+//
+// The walk counts DIRECTORIES at the prune site (never descending), and its
+// clause names that unit; `--changed` counts files and keeps its own wording.
+
+function fencedWalkFixture(): Fixture {
+  return makeRepo({
+    "src/a.ts": GOOD_ANNOTATION,
+    "node_modules/lodash/a.ts": GOOD_ANNOTATION,
+    "node_modules/lodash/b.ts": GOOD_ANNOTATION,
+    "node_modules/lodash/c.ts": GOOD_ANNOTATION,
+    "dist/bundle.js": GOOD_ANNOTATION,
+  });
+}
+
+test("SPGD-1286: the walk counts fenced DIRECTORIES at the prune site — never descending, never selecting a fenced file", () => {
+  const f = fencedWalkFixture();
+  const selection = selectFiles([], f.root);
+  // Two pruned directory entries (node_modules, dist) — NOT the 4 files
+  // inside them, and the nested node_modules/lodash is never visited.
+  assert.equal(selection.skipped, 2);
+  assert.deepEqual(
+    selection.files.map((file) => path.relative(f.root, file)),
+    ["src/a.ts"],
+  );
+  // Many files inside one fenced directory still count as ONE directory:
+  // the count cannot have come from descending.
+  const many: Record<string, string> = { "src/a.ts": GOOD_ANNOTATION };
+  for (let i = 0; i < 50; i++) many[`node_modules/pkg/f${i}.ts`] = GOOD_ANNOTATION;
+  assert.equal(selectFiles([], makeRepo(many).root).skipped, 1);
+});
+
+test("SPGD-1286: a fenced walk prints the unit-named clause; a clean walk is byte-identical to before; explicit stays 0", () => {
+  const fenced = fencedWalkFixture();
+  const binary = stubBackend([{ file: "src/a.ts", line: 1, kind: null, ok: true, errors: [] }], 1);
+  const withFence = renderHuman(inRepo(fenced, [], binary));
+  assert.equal(
+    withFence.split("\n")[0],
+    "specguard lint: checked 1 source file skipping 2 dependency or build directories",
+  );
+
+  const clean = makeRepo({ "src/a.ts": GOOD_ANNOTATION });
+  const noFence = renderHuman(inRepo(clean, [], binary));
+  assert.equal(noFence.split("\n")[0], "specguard lint: checked 1 source file");
+  assert.ok(!noFence.includes("skipping"), noFence);
+
+  assert.equal(selectFiles(["src/a.ts"], fenced.root).skipped, 0);
+
+  // The json selection block keeps its pinned key set in walk mode too.
+  const json = JSON.parse(renderJson(inRepo(fenced, [], binary))) as {
+    selection?: Record<string, unknown>;
+  };
+  assert.ok(json.selection === undefined || !("skipped" in json.selection));
+});
+
+test("SPGD-1286: the two clauses differ deliberately — walk names its unit, --changed keeps 'skipping N in …'", () => {
+  const base = { base: null, note: null, stats: null } as const;
+  const walkLine = provenanceLine(1, { files: ["a.ts"], mode: "walk", ...base, skipped: 3 });
+  assert.equal(walkLine, "specguard lint: checked 1 source file skipping 3 dependency or build directories");
+  const changedLine = provenanceLine(1, { files: ["a.ts"], mode: "changed", ...base, base: "main", skipped: 3 });
+  assert.equal(
+    changedLine,
+    "specguard lint: checked 1 source file changed since main skipping 3 in dependency or build directories",
+  );
+  assert.ok(!walkLine.includes(" in dependency"));
 });
 
 test("a changed run whose fence removed files discloses the count on the checked-count line; the json selection block keeps its shape", () => {

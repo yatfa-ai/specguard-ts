@@ -811,7 +811,9 @@ fixed directory list the walk skips (`node_modules`, `.git`, `dist`,
 a directory merely *named after* a fenced word (`src/dist_helpers/`) is
 project code, and so is a file merely named `coverage.ts` — and when the
 fence removed files, the `checked N source files changed since <base>` line
-says `skipping M in dependency or build directories`. Untracked files obey
+says `skipping M in dependency or build directories` (M counts files). The plain
+walk discloses its fence too, counting the fenced *directories* it pruned without
+descending into them: `skipping N dependency or build directories`. Untracked files obey
 the same scoping as diffed ones, so an untracked file
 outside the current directory is counted as outside, not checked. When the
 untracked leg contributed, the `checked N source files changed since <base>`
