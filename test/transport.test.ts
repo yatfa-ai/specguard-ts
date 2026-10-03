@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deliver, deliverRawLine, GZIP_THRESHOLD_BYTES, refusalReasons, version } from "../src/core/transport.js";
+import { deliver, deliverRawLine, describeHttpFailure, GZIP_THRESHOLD_BYTES, refusalReasons, version } from "../src/core/transport.js";
 import type { RunnerEnv } from "../src/core/env.js";
 import type { Envelope } from "../src/core/types.js";
 import type { SpecRow } from "../src/core/types.js";
@@ -453,7 +453,7 @@ test("SPGD-1418: the successful fall-back sentence is single-sourced — pinned 
     assert.equal(s.warnings.length, 1);
     assert.equal(
       s.warnings[0],
-      `SpecGuard: could not deliver test telemetry (HTTP 401 — unauthorized). Falling back to ${base.outputPath}; the test run is unaffected.`,
+      `SpecGuard: could not deliver test telemetry (HTTP 401 — the API key was not accepted). Falling back to ${base.outputPath}; the test run is unaffected.`,
     );
     assert.equal(s.writes.length, 1);
   } finally {
@@ -610,4 +610,85 @@ test("SPGD-1226: refusalReasons — the Ruby twin's predicate matrix, unit-pinne
   assert.equal(refusalReasons("7"), null);
   assert.equal(refusalReasons('"s"'), null);
   assert.equal(refusalReasons('{"details":"a string"}'), null);
+});
+
+// ── SPGD-1237: the ADVICE map — what a status MEANS ─────────────────────────
+
+async function warnFor(status: number, body: string): Promise<string> {
+  const srv = await startServer((_req, res) => {
+    res.statusCode = status;
+    res.end(body);
+  });
+  try {
+    const s = sink();
+    await deliver(envelope(), env({ endpoint: srv.url }), { warn: s.warn, appendFileImpl: s.appendFile });
+    return s.warnings[0] ?? "";
+  } finally {
+    await srv.close();
+  }
+}
+
+test("SPGD-1237: a 401 with the platform's JSON body composes status · advice · the platform's own words", async () => {
+  const line = await warnFor(
+    401,
+    JSON.stringify({ error: "unauthorized", message: "A valid Bearer API key is required." }),
+  );
+  assert.ok(
+    line.includes("HTTP 401 — the API key was not accepted — A valid Bearer API key is required."),
+    line,
+  );
+});
+
+test("SPGD-1237: a 404 whose body is a Rails HTML page names the remedy and drops the page", async () => {
+  const html =
+    "<!DOCTYPE html><html><head><title>The page you were looking for does not exist (404)</title><style>body{background-color:#fff;color:#666;text-align:center}</style></head></html>";
+  const line = await warnFor(404, html);
+  assert.ok(
+    line.includes("(HTTP 404 — no ingest endpoint at that URL — check SPECGUARD_ENDPOINT)"),
+    line,
+  );
+  assert.ok(!line.includes("<!DOCTYPE") && !line.includes("background-color"), line);
+});
+
+test("SPGD-1237: empty-bodied 429 and 413 still say what the status means", async () => {
+  assert.ok((await warnFor(429, "")).includes("(HTTP 429 — rate limited by the endpoint)"));
+  assert.ok((await warnFor(413, "")).includes("(HTTP 413 — the payload was too large for the endpoint)"));
+});
+
+test("SPGD-1237: the drop rule is pinned from both sides — 401 over `boom` drops it, 500 over `boom` keeps it", async () => {
+  assert.ok((await warnFor(401, "boom")).includes("(HTTP 401 — the API key was not accepted)"));
+  assert.ok((await warnFor(500, "boom")).includes("(HTTP 500 — boom)"));
+  assert.ok((await warnFor(500, "")).includes("(HTTP 500)"));
+});
+
+test("SPGD-1237: describeHttpFailure keeps the detail only when the body parsed as a refusal", () => {
+  assert.equal(describeHttpFailure(400, "x", ["a", "b"]), "HTTP 400 — the endpoint rejected the payload — x");
+  assert.equal(describeHttpFailure(400, "x", null), "HTTP 400 — the endpoint rejected the payload");
+  assert.equal(describeHttpFailure(418, "teapot", null), "HTTP 418 — teapot");
+  assert.equal(describeHttpFailure(403, "", null), "HTTP 403 — this API key may not write to that repository");
+});
+
+test("SPGD-1237: a body that cannot be read still composes advice-only — never throws", async () => {
+  const res = { ok: false, status: 429, text: () => Promise.reject(new Error("reset")) } as unknown as Response;
+  const s = sink();
+  const out = await deliver(envelope(), env({ endpoint: "http://x.invalid" }), {
+    warn: s.warn,
+    appendFileImpl: s.appendFile,
+    fetchImpl: (async () => res) as unknown as typeof fetch,
+  });
+  assert.equal(out.outcome, "fell-back");
+  assert.ok((s.warnings[0] ?? "").includes("(HTTP 429 — rate limited by the endpoint)"), s.warnings[0]);
+});
+
+test("SPGD-1237: describeHttpFailure renders a single reason itself, a multi-reason refusal keeps the capped body", () => {
+  assert.equal(
+    describeHttpFailure(401, '{"message":"m"}', ["m"]),
+    "HTTP 401 — the API key was not accepted — m",
+  );
+  assert.equal(
+    describeHttpFailure(400, '{"details":["a","b"]}', ["a", "b"]),
+    'HTTP 400 — the endpoint rejected the payload — {"details":["a","b"]}',
+  );
+  // No advice entry: composes exactly as before, body and all.
+  assert.equal(describeHttpFailure(500, '{"message":"m"}', ["m"]), 'HTTP 500 — {"message":"m"}');
 });
