@@ -692,3 +692,13 @@ test("SPGD-1237: describeHttpFailure renders a single reason itself, a multi-rea
   // No advice entry: composes exactly as before, body and all.
   assert.equal(describeHttpFailure(500, '{"message":"m"}', ["m"]), 'HTTP 500 — {"message":"m"}');
 });
+
+test("SPGD-1583: a single refusal reason is flattened to one line and capped at 300 chars + ellipsis", () => {
+  const long = `first line\n   second\tline ${"x".repeat(400)}`;
+  const flat = `first line second line ${"x".repeat(400)}`;
+  assert.equal(
+    describeHttpFailure(401, "ignored", [long]),
+    `HTTP 401 — the API key was not accepted — ${flat.slice(0, 300)}…`,
+  );
+  assert.equal(describeHttpFailure(401, "ignored", ["a\n  b"]), "HTTP 401 — the API key was not accepted — a b");
+});
