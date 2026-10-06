@@ -687,7 +687,9 @@ steps:
 
 ## The wire contract
 
-`POST <endpoint>/api/v1/ingest`, `Authorization: Bearer sgk_…`, `Content-Type: application/json`. A body
+`POST <endpoint>/api/v1/ingest` with an `sgk_` repository key, or `POST <endpoint>/api/v1/repositories/<id>/ingest`
+with an `sga_` agent key (see "Using an `sga_` agent key?" near the top), `Authorization: Bearer <key>`,
+`Content-Type: application/json`. A body
 over **256 KiB** is gzipped with `Content-Encoding: gzip` — that threshold is the Ruby client's, and
 matching it keeps the two clients' behaviour on a large suite the same. Success is **`202 Accepted`**:
 
