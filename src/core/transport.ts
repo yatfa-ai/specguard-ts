@@ -102,6 +102,50 @@ export const ADVICE: Readonly<Record<number, string>> = {
 };
 
 /**
+ * The 404 advice when a repository id was sent (`SPECGUARD_REPOSITORY_ID`):
+ * the path then names a repository, so "no endpoint at that URL" would point
+ * the reader at the wrong setting. Same sentence as the Ruby client's.
+ */
+export const REPOSITORY_404_ADVICE =
+  "no repository with that id is available to this API key — check SPECGUARD_REPOSITORY_ID";
+
+/** A repository id is one path segment: no dots, `/`, `?` or `#`. */
+const REPOSITORY_ID_PATTERN = /^[0-9A-Za-z_-]+$/;
+
+/** `true` when `id` is usable as the `:repository_id` path segment. */
+export function isValidRepositoryId(id: string): boolean {
+  return REPOSITORY_ID_PATTERN.test(id);
+}
+
+/**
+ * The one-line reason an unusable `SPECGUARD_REPOSITORY_ID` is refused, or
+ * `null` when the env carries none (unset, or a usable id). Shared by
+ * `deliver`, `deliverRawLine` and `specguard-ingest` so the sentence cannot
+ * drift between them.
+ */
+export function repositoryIdProblem(env: Pick<RunnerEnv, "repositoryId">): string | null {
+  const id = env.repositoryId ?? null;
+  if (id === null || isValidRepositoryId(id)) return null;
+  return `SPECGUARD_REPOSITORY_ID must contain only letters, digits, "-" and "_" (got ${JSON.stringify(oneLine(id))})`;
+}
+
+/**
+ * THE ingest URL — the single builder `deliver` and `deliverRawLine` both
+ * use, so the two sites cannot drift. No repository id: `<endpoint>/api/v1/ingest`
+ * (an `sgk_` key). With one: `<endpoint>/api/v1/repositories/<id>/ingest`
+ * (the only path an `sga_` agent key is accepted on). Returns `null` for an
+ * invalid id — nothing may be built from it; callers check
+ * `repositoryIdProblem` first to say why.
+ */
+export function ingestUrl(env: Pick<RunnerEnv, "endpoint" | "repositoryId">): string | null {
+  const base = (env.endpoint ?? "").replace(/\/+$/, "");
+  const id = env.repositoryId ?? null;
+  if (id === null) return `${base}/api/v1/ingest`;
+  if (!isValidRepositoryId(id)) return null;
+  return `${base}/api/v1/repositories/${id}/ingest`;
+}
+
+/**
  * Compose the delivery-failure diagnostic: `HTTP <status>` · advice · detail,
  * absent clauses dropped (Ruby's `[...].compact.join(" — ")`).
  *
@@ -114,6 +158,9 @@ export const ADVICE: Readonly<Record<number, string>> = {
  *
  * One-reason refusals render that reason itself rather than the JSON around it.
  *
+ * `repositoryIdSent` (optional, default false) says the request carried a
+ * `SPECGUARD_REPOSITORY_ID`; only the 404 advice changes with it.
+ *
  * `reasons` is passed in rather than re-derived from `detail`: `detail` is
  * already flattened and capped at 300 chars, and a truncated JSON body no
  * longer parses.
@@ -122,8 +169,10 @@ export function describeHttpFailure(
   status: number,
   detail: string,
   reasons: string[] | null,
+  repositoryIdSent = false,
 ): string {
-  const advice = ADVICE[status];
+  const advice =
+    status === 404 && repositoryIdSent ? REPOSITORY_404_ADVICE : ADVICE[status];
   let detailClause = detail;
   if (advice !== undefined) {
     if (reasons === null) detailClause = "";
@@ -138,7 +187,8 @@ export function describeHttpFailure(
 }
 
 /**
- * Deliver one envelope to `<endpoint>/api/v1/ingest`.
+ * Deliver one envelope to `ingestUrl(env)` — `<endpoint>/api/v1/ingest`, or
+ * `<endpoint>/api/v1/repositories/<id>/ingest` when `SPECGUARD_REPOSITORY_ID` is set.
  *
  * NEVER THROWS. This is the roadmap's hardest constraint and it outranks
  * every other goal: telemetry may be lost, a test run may not be. Node's
@@ -176,7 +226,19 @@ export async function deliver(
     return { delivered: false, outcome: "skipped" };
   }
 
-  const url = `${env.endpoint.replace(/\/+$/, "")}/api/v1/ingest`;
+  // An unusable repository id is refused BEFORE anything reaches fetch — and
+  // without throwing: the run falls back to the replay queue like any other
+  // undeliverable run.
+  const url = ingestUrl(env);
+  if (url === null) {
+    return fallBackToQueue(
+      `SpecGuard: could not deliver test telemetry (${repositoryIdProblem(env)})`,
+      append,
+      warn,
+      env,
+      json,
+    );
+  }
   const fetchImpl = deps.fetchImpl ?? fetch;
 
   try {
@@ -195,7 +257,7 @@ export async function deliver(
         detail = "";
       }
       return fallBackToQueue(
-        `SpecGuard: could not deliver test telemetry (${describeHttpFailure(res.status, detail, reasons)})`,
+        `SpecGuard: could not deliver test telemetry (${describeHttpFailure(res.status, detail, reasons, env.repositoryId != null)})`,
         append,
         warn,
         env,
@@ -354,7 +416,10 @@ export async function deliverRawLine(
     // request against an "undefined" URL.
     return { outcome: "network-error", detail: "no endpoint or API key configured" };
   }
-  const url = `${env.endpoint.replace(/\/+$/, "")}/api/v1/ingest`;
+  const url = ingestUrl(env);
+  if (url === null) {
+    return { outcome: "network-error", detail: repositoryIdProblem(env) ?? "invalid repository id" };
+  }
 
   try {
     const res = await postJson(line, url, env, deps.fetchImpl ?? fetch);

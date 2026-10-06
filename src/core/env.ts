@@ -7,6 +7,14 @@ export interface RunnerEnv {
   shardId: string | null;
   endpoint: string | null;
   apiKey: string | null;
+  /**
+   * The repository an `sga_` agent key delivers to (`SPECGUARD_REPOSITORY_ID`).
+   * An agent key covers a SET of repositories and cannot name one itself, so the
+   * platform accepts it only at `POST /api/v1/repositories/:id/ingest`. `null`
+   * (unset or blank) keeps the bare `/api/v1/ingest` path, which is what an
+   * `sgk_` repository key uses.
+   */
+  repositoryId: string | null;
   /** Delivery timeout in milliseconds. Bounded, no retries. */
   timeoutMs: number;
   /** Where undeliverable runs are appended, one JSON envelope per line. */
@@ -135,6 +143,7 @@ export function readRunnerEnv(
     shardId: shardIdRaw === null ? null : String(shardIdRaw),
     endpoint: firstEnv(env, ["SPECGUARD_ENDPOINT"]),
     apiKey: firstEnv(env, ["SPECGUARD_API_KEY"]),
+    repositoryId: firstEnv(env, ["SPECGUARD_REPOSITORY_ID"]),
     timeoutMs:
       Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
         ? timeoutSeconds * 1000

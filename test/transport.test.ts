@@ -40,6 +40,7 @@ function env(overrides: Partial<RunnerEnv> = {}): RunnerEnv {
     shardId: "0",
     endpoint: "http://127.0.0.1:1", // connection-refused port by default
     apiKey: "sgk_test",
+    repositoryId: null,
     timeoutMs: 500,
     outputPath: "/tmp/specguard-ts-test-replay-queue.jsonl",
     localOutputPath: "/tmp/specguard-ts-test-local-sink.jsonl",
@@ -701,4 +702,99 @@ test("SPGD-1583: a single refusal reason is flattened to one line and capped at 
     `HTTP 401 — the API key was not accepted — ${flat.slice(0, 300)}…`,
   );
   assert.equal(describeHttpFailure(401, "ignored", ["a\n  b"]), "HTTP 401 — the API key was not accepted — a b");
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-1596: SPECGUARD_REPOSITORY_ID — the repository-scoped ingest route an
+// `sga_` agent key is accepted on.
+
+function recordingFetch(status = 202, body = "{}"): { urls: string[]; fetchImpl: typeof fetch } {
+  const urls: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    urls.push(String(url));
+    return new Response(body, { status });
+  }) as unknown as typeof fetch;
+  return { urls, fetchImpl };
+}
+
+test("SPGD-1596: no repository id — deliver and deliverRawLine post to the bare /api/v1/ingest, byte-identical", async () => {
+  const a = recordingFetch();
+  const s = sink();
+  await deliver(envelope(), env({ endpoint: "https://sg.example.com/", repositoryId: null }), {
+    warn: s.warn, appendFileImpl: s.appendFile, fetchImpl: a.fetchImpl,
+  });
+  const b = recordingFetch();
+  await deliverRawLine("{}", env({ endpoint: "https://sg.example.com/", repositoryId: null }), { fetchImpl: b.fetchImpl });
+  assert.deepEqual(a.urls, ["https://sg.example.com/api/v1/ingest"]);
+  assert.deepEqual(b.urls, ["https://sg.example.com/api/v1/ingest"]);
+});
+
+test("SPGD-1596: deliver requests the repository-scoped URL when a repository id is set", async () => {
+  const r = recordingFetch();
+  const s = sink();
+  const out = await deliver(envelope(), env({ endpoint: "https://sg.example.com/", repositoryId: "42" }), {
+    warn: s.warn, appendFileImpl: s.appendFile, fetchImpl: r.fetchImpl,
+  });
+  assert.equal(out.outcome, "sent");
+  assert.deepEqual(r.urls, ["https://sg.example.com/api/v1/repositories/42/ingest"]);
+});
+
+test("SPGD-1596: deliverRawLine requests the repository-scoped URL when a repository id is set", async () => {
+  const r = recordingFetch();
+  const out = await deliverRawLine("{}", env({ endpoint: "https://sg.example.com", repositoryId: "42" }), {
+    fetchImpl: r.fetchImpl,
+  });
+  assert.equal(out.outcome, "accepted");
+  assert.deepEqual(r.urls, ["https://sg.example.com/api/v1/repositories/42/ingest"]);
+});
+
+test("SPGD-1596: an invalid repository id never reaches fetch and never throws", async () => {
+  for (const bad of ["../x", "4/2", "42?x", "4.2", "4#2", "a b"]) {
+    const r = recordingFetch();
+    const s = sink();
+    const out = await deliver(envelope(), env({ repositoryId: bad }), {
+      warn: s.warn, appendFileImpl: s.appendFile, fetchImpl: r.fetchImpl,
+    });
+    assert.equal(out.outcome, "fell-back", bad);
+    assert.equal(out.delivered, false, bad);
+    assert.equal(r.urls.length, 0, bad);
+    assert.ok((s.warnings[0] ?? "").includes("SPECGUARD_REPOSITORY_ID"), s.warnings[0]);
+
+    const raw = await deliverRawLine("{}", env({ repositoryId: bad }), { fetchImpl: r.fetchImpl });
+    assert.equal(raw.outcome, "network-error", bad);
+    assert.equal(r.urls.length, 0, bad);
+  }
+});
+
+test("SPGD-1596: a 404 names the repository id only when one was sent", async () => {
+  const withId = recordingFetch(404, '{"message":"nope"}');
+  const s1 = sink();
+  await deliver(envelope(), env({ endpoint: "https://sg.example.com", repositoryId: "42" }), {
+    warn: s1.warn, appendFileImpl: s1.appendFile, fetchImpl: withId.fetchImpl,
+  });
+  assert.ok(
+    (s1.warnings[0] ?? "").includes(
+      "HTTP 404 — no repository with that id is available to this API key — check SPECGUARD_REPOSITORY_ID — nope",
+    ),
+    s1.warnings[0],
+  );
+
+  const without = recordingFetch(404, '{"message":"nope"}');
+  const s2 = sink();
+  await deliver(envelope(), env({ endpoint: "https://sg.example.com" }), {
+    warn: s2.warn, appendFileImpl: s2.appendFile, fetchImpl: without.fetchImpl,
+  });
+  assert.ok(
+    (s2.warnings[0] ?? "").includes("HTTP 404 — no ingest endpoint at that URL — check SPECGUARD_ENDPOINT — nope"),
+    s2.warnings[0],
+  );
+});
+
+test("SPGD-1596: describeHttpFailure's optional 4th parameter swaps only the 404 advice", () => {
+  assert.equal(
+    describeHttpFailure(404, "", null, true),
+    "HTTP 404 — no repository with that id is available to this API key — check SPECGUARD_REPOSITORY_ID",
+  );
+  assert.equal(describeHttpFailure(404, "", null), "HTTP 404 — no ingest endpoint at that URL — check SPECGUARD_ENDPOINT");
+  assert.equal(describeHttpFailure(403, "", null, true), "HTTP 403 — this API key may not write to that repository");
 });

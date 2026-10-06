@@ -363,3 +363,9 @@ test("a whitespace-only SPECGUARD_COMMIT_SHA no longer shadows the git fallback"
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("SPGD-1596: SPECGUARD_REPOSITORY_ID is read trimmed; unset or blank is null", () => {
+  assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a" }) }).repositoryId, null);
+  assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_REPOSITORY_ID: "  " }) }).repositoryId, null);
+  assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_REPOSITORY_ID: " 42 " }) }).repositoryId, "42");
+});

@@ -25,6 +25,7 @@ function env(overrides: Partial<RunnerEnv> = {}): RunnerEnv {
     shardId: "0",
     endpoint: "https://specguard.example.com",
     apiKey: "sgk_test",
+    repositoryId: null,
     timeoutMs: 1000,
     outputPath: "log/test_results.jsonl",
     localOutputPath: "log/test_results.local.jsonl",

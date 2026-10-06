@@ -66,6 +66,21 @@ export SPECGUARD_API_KEY=sgk_…      # from your repository's settings
 export SPECGUARD_TIMEOUT=10         # optional; seconds, applied to the whole delivery
 ```
 
+**Using an `sga_` agent key?** An agent key covers a set of repositories and cannot name one itself, so the
+platform accepts it only at `POST <endpoint>/api/v1/repositories/<id>/ingest` and refuses it on the bare
+`/api/v1/ingest`. Set `SPECGUARD_REPOSITORY_ID` to the repository's numeric id (from `list_repositories`) and
+the client delivers there instead:
+
+```bash
+export SPECGUARD_API_KEY=sga_…
+export SPECGUARD_REPOSITORY_ID=42   # letters, digits, "-" and "_" only
+```
+
+Unset or blank, the URL is the bare `/api/v1/ingest` an `sgk_` repository key uses. An id with any other
+character is never sent: the run falls back to the replay queue with a one-line warning (and
+`specguard-ingest` exits `2` once, up front). A `404` with an id set reads "no repository with that id is
+available to this API key — check SPECGUARD_REPOSITORY_ID".
+
 **The API key is the switch.** With no key nothing is sent anywhere and the run is written to
 `log/test_results.local.jsonl` — the **local development record** — so local development needs no opt-out
 and a fork with no secret configured behaves like a laptop rather than like a broken build. Its name is
@@ -201,7 +216,7 @@ specguard-ingest: lines 1, 2 carried ci_run_id 17442 and each came back with
 test_run_id 41f2c9b8 — the endpoint folded them onto one run
 ```
 
-It reads the same `SPECGUARD_ENDPOINT`, `SPECGUARD_API_KEY` and `SPECGUARD_TIMEOUT` the reporters do, and
+It reads the same `SPECGUARD_ENDPOINT`, `SPECGUARD_API_KEY`, `SPECGUARD_REPOSITORY_ID` and `SPECGUARD_TIMEOUT` the reporters do, and
 sends each line through the same delivery path — URL join, gzip threshold, headers, timeout — so a replay
 reaches the endpoint exactly as the original delivery would have. Each line is delivered **once**, with no
 retry: the command runs out of band, and re-running it is the retry made by someone who can see why the
@@ -735,8 +750,9 @@ Self-hosting needs no code change — point `SPECGUARD_ENDPOINT` at your own dep
 - **No failure messages and no stack traces.** A failing test contributes the string `failed` and nothing else.
 - **No console output.** Nothing your suite printed, and nothing any other reporter wrote, is read or forwarded.
 - **No environment.** A fixed list of variables is read and no others: the ones that fill `commit_sha`,
-  `branch`, `ci_run_id` and `shard_id`, plus five that configure the client itself — `SPECGUARD_ENDPOINT`,
-  `SPECGUARD_OUTPUT_PATH`, `SPECGUARD_LOCAL_OUTPUT_PATH`, `SPECGUARD_TIMEOUT`, and `SPECGUARD_API_KEY`,
+  `branch`, `ci_run_id` and `shard_id`, plus six that configure the client itself — `SPECGUARD_ENDPOINT`,
+  `SPECGUARD_OUTPUT_PATH`, `SPECGUARD_LOCAL_OUTPUT_PATH`, `SPECGUARD_TIMEOUT`, `SPECGUARD_REPOSITORY_ID`
+  (the repository id in the ingest URL for an `sga_` agent key), and `SPECGUARD_API_KEY`,
   which leaves the machine only as the bearer token above.
 - **Proxy settings are read, and this is the one exception** — they decide only *where* the run goes,
   never what is in it.

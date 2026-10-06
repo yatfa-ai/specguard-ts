@@ -175,7 +175,7 @@ test("telemetry is unaffected by every unavailable state: the node-test reporter
   for await (const line of specguardReporter(events(), {
     env: {
       commitSha: "abc", branch: "main", ciRunId: "1", shardId: "0",
-      endpoint: null, apiKey: null, timeoutMs: 100, outputPath: "/dev/null",
+      endpoint: null, apiKey: null, repositoryId: null, timeoutMs: 100, outputPath: "/dev/null",
       localOutputPath: "/dev/null",
     },
   })) {
