@@ -6,7 +6,7 @@ import { VALIDATOR_UNAVAILABLE, type ValidatorResolution } from "../core/validat
  * The binary-validation half of `specguard lint`: hand the in-scope SOURCE
  * FILES to the resolved `validate-intent` binary and read its findings back.
  *
- * This mirrors `specguard-rspec`'s `ValidatorBackend::Runner` (v0.2.3) so the
+ * This mirrors `specguard-ruby`'s `ValidatorBackend::Runner` (v0.2.3) so the
  * two clients share one contract on both sides of the seam:
  *
  *   * the binary is invoked as `validate-intent --source --json <patterns>` —

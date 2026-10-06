@@ -7,7 +7,7 @@ Published as **`@yatfa/specguard`**; the repository is still named `specguard-ts
 `specguard` on npm belongs to an unrelated package. The scope is what drops the suffix from the installed
 name — nothing else about the client changed with it, the `User-Agent` below included.
 
-The shape deliberately mirrors [`specguard-rspec`](https://github.com/yatfa-ai/specguard-rspec), the Ruby
+The shape deliberately mirrors [`specguard-ruby`](https://github.com/yatfa-ai/specguard-ruby), the Ruby
 client: same environment variables, same wire contract — a team running both languages against one SpecGuard
 deployment configures them identically, and the two clients are distinguishable on the platform only by
 `User-Agent` (`specguard-ts/<version>`).
