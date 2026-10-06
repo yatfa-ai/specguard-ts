@@ -6,7 +6,7 @@ import fs from "node:fs";
  * Runner-agnostic `validate-intent` binary resolution — the prerequisite for
  * every annotation-capability slice (lint, intent-on-telemetry).
  *
- * Precedence, mirroring the Ruby client (`specguard-rspec`'s
+ * Precedence, mirroring the Ruby client (`specguard-ruby`'s
  * `ValidatorBackend.resolve`):
  *
  *   1. `SPECGUARD_VALIDATE_INTENT` names a binary. Blank counts as unset —
@@ -29,7 +29,7 @@ export const VALIDATE_INTENT_ENV_VAR = "SPECGUARD_VALIDATE_INTENT";
 
 /**
  * The schema contract this client targets: open-test-intent v1, the same
- * vendored bytes `specguard-rspec` ships (sha256 of
+ * vendored bytes `specguard-ruby` ships (sha256 of
  * `schemas/open-test-intent.v1.json`). A binary enforcing different bytes
  * would produce verdicts under a contract this client cannot stand behind —
  * a wrong-contract binary is worse than no binary, so a mismatch is a
@@ -45,7 +45,7 @@ const SCHEMA_SOURCE_FLAG = "--schema-source";
  * `--schema-source` writes ONE line: `schema <origin> sha256:<64-hex>`, where
  * the origin is an absolute path or the literal `<embedded schema>`. Anchored
  * to the whole line; pinned against recorded output of the real binary (see
- * `specguard-rspec/spec/fixtures/validator/schema-source-probes.json`) so a
+ * `specguard-ruby/spec/fixtures/validator/schema-source-probes.json`) so a
  * parse bug cannot silently read as "binary too old".
  */
 const SCHEMA_SOURCE_PATTERN =

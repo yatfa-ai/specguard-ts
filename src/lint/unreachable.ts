@@ -8,7 +8,7 @@ import type { LintFinding } from "./lint.js";
  * VALID in isolation but can never be extracted, so linting them clean is a
  * lie the binary alone cannot catch.
  *
- * This ports the stacked arm of `specguard-rspec`'s
+ * This ports the stacked arm of `specguard-ruby`'s
  * `Scanner.stacked_findings_in_text` (SPGD-900) — the decision function was
  * diffed line by line against it, not summarized. The extraction contract
  * (SPGD-12 §2, both clients) is ONE-line and example-anchored: an example
@@ -37,7 +37,7 @@ import type { LintFinding } from "./lint.js";
  * same line.
  *
  * The SEPARATED arm (SPGD-1550) is a third way to be dead (originated in TS,
- * since mirrored in specguard-rspec `scanner.rb`
+ * since mirrored in specguard-ruby `scanner.rb`
  * `separated_findings_in_text`, SPGD-1554): a comment-form `@intent:` run whose last line is separated from
  * its example by exactly ONE intervening line — a blank, or an ordinary
  * comment without an `@intent:` token. The one-line lookback claims only the
@@ -52,7 +52,7 @@ import type { LintFinding } from "./lint.js";
  * `describe(` beneath (SPGD-1522's deferral) are out of scope.
  *
  * The OWN-LINE-SHADOW arm (SPGD-1556) is a fourth way to be dead (also
- * originally TS-only, since mirrored in specguard-rspec `scanner.rb`
+ * originally TS-only, since mirrored in specguard-ruby `scanner.rb`
  * `own_line_shadow_findings_in_text`, SPGD-1560): a comment-form `@intent:` run directly above an example
  * line that ALSO carries its own trailing `@intent: {…}` payload. Extraction
  * is own-line-first (annotate.ts ARM 1 returns the row's own annotation

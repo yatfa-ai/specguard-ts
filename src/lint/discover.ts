@@ -50,7 +50,7 @@ export const INTENT_TOKEN = "@intent:";
 
 /**
  * Ordered probes for the default branch when no explicit `--changed=<base>`
- * is given, in the Ruby client's settled order (`specguard-rspec`
+ * is given, in the Ruby client's settled order (`specguard-ruby`
  * `file_selector.rb` — the contract this port mirrors): the symbolic
  * `origin/HEAD` first, then the two remote mains, then the local names.
  */
@@ -275,7 +275,7 @@ export function selectFiles(
 /**
  * The `--changed` selection: annotated-source files changed against a diff
  * base, ported decision by decision from the Ruby client's `FileSelector`
- * (`specguard-rspec/lib/specguard/client/file_selector.rb`) — the code whose
+ * (`specguard-ruby/lib/specguard/client/file_selector.rb`) — the code whose
  * measured defects this port exists to keep from being re-derived:
  *
  *   * The base is the **merge base with the default branch**, never bare
