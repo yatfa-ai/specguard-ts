@@ -390,8 +390,10 @@ export type RawDeliveryResult =
   | { outcome: "network-error"; detail: string };
 
 /**
- * Deliver ONE saved line's exact bytes to `<endpoint>/api/v1/ingest` — the
- * raw-body seam the `specguard-ingest` replay bin rides.
+ * Deliver ONE saved line's exact bytes to `ingestUrl(env)` —
+ * `<endpoint>/api/v1/ingest`, or `<endpoint>/api/v1/repositories/<id>/ingest`
+ * when `SPECGUARD_REPOSITORY_ID` is set — the raw-body seam the
+ * `specguard-ingest` replay bin rides.
  *
  * Unlike `deliver`, this never writes a fallback file: the line is already
  * on disk, and a replay that re-appended it on failure would duplicate it
