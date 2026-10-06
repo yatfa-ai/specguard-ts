@@ -200,6 +200,28 @@ test("SPGD-1596: specguard-ingest delivers to the repository-scoped path when SP
   }
 });
 
+test("SPGD-1602: specguard-ingest's own 404 line names the repository id only when SPECGUARD_REPOSITORY_ID is set", async () => {
+  const srv = await captureServer({ status: 404, body: '{"message":"nope"}' });
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  try {
+    const scoped = await runCli([file], srv.url, { SPECGUARD_REPOSITORY_ID: "42" });
+    assert.equal(scoped.code, 2, scoped.stderr);
+    assert.match(
+      scoped.stdout,
+      /HTTP 404 — no repository with that id is available to this API key — check SPECGUARD_REPOSITORY_ID/,
+    );
+    assert.doesNotMatch(scoped.stdout, /no ingest endpoint at that URL/);
+
+    const bare = await runCli([file], srv.url);
+    assert.equal(bare.code, 2, bare.stderr);
+    assert.match(bare.stdout, /HTTP 404 — no ingest endpoint at that URL — check SPECGUARD_ENDPOINT/);
+    assert.doesNotMatch(bare.stdout, /no repository with that id/);
+  } finally {
+    rm(file);
+    await srv.close();
+  }
+});
+
 test("usage: no endpoint and no API key are separate 2s naming the separate fixes", async () => {
   const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
   try {
