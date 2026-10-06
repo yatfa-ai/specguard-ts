@@ -13,7 +13,7 @@ import { renderDelivery, renderListing } from "./ingest-reporter.js";
  * is the command that sends it: fix the rotated key, then replay the run the
  * suite already finished, instead of re-running the suite.
  *
- * Mirrors `SpecGuard::RSpec::IngestCLI` (the Ruby client's bin), same exit
+ * Mirrors `SpecGuard::Client::IngestCLI` (the Ruby client's bin), same exit
  * contract as `specguard lint`:
  *
  *   0  every line was accepted (or the file was listed)

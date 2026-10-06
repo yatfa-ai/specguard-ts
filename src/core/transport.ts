@@ -47,7 +47,7 @@ function oneLine(text: string): string {
 
 /**
  * The refusal body's per-spec reasons, on exactly the Ruby Transport's
- * `refusal_reasons` predicates (`lib/specguard/rspec/transport.rb`):
+ * `refusal_reasons` predicates (`lib/specguard/client/transport.rb`):
  *
  *   - the body must be a JSON **object** — a scalar or an array says nothing
  *     this tool can name;
@@ -88,7 +88,7 @@ export function refusalReasons(bodyText: string): string[] | null {
 
 /**
  * What an HTTP status MEANS to the person reading the line — ported verbatim
- * from the Ruby transport's `ADVICE` (`lib/specguard/rspec/transport.rb`),
+ * from the Ruby transport's `ADVICE` (`lib/specguard/client/transport.rb`),
  * entries and values included. A status with no entry (500, and every other
  * code) carries no advice clause; inventing one is a separate decision.
  */

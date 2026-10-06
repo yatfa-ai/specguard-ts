@@ -4,8 +4,8 @@ import type { Drained, Folding, LineResult, ListedLine, Source, StatusCounts } f
  * `specguard-ingest --json`: the machine-readable renderer over the same
  * per-line facts the human report is built from.
  *
- * A port of the Ruby client's `SpecGuard::RSpec::IngestReporter`
- * (`lib/specguard/rspec/ingest_reporter.rb`) — the document shape is that
+ * A port of the Ruby client's `SpecGuard::Client::IngestReporter`
+ * (`lib/specguard/client/ingest_reporter.rb`) — the document shape is that
  * file's, key for key: two clients emitting differently-shaped documents for
  * one command is the defect parity exists to prevent.
  *
