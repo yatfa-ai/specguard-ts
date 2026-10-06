@@ -766,6 +766,17 @@ test("SPGD-1596: an invalid repository id never reaches fetch and never throws",
   }
 });
 
+test("SPGD-1602: repository ids with letters, uppercase, digits, hyphen and underscore are accepted and reach the URL", async () => {
+  for (const id of ["abc", "ABC", "123", "a-b", "a_b", "Ab-9_z"]) {
+    const r = recordingFetch();
+    const out = await deliverRawLine("{}", env({ endpoint: "https://sg.example.com", repositoryId: id }), {
+      fetchImpl: r.fetchImpl,
+    });
+    assert.equal(out.outcome, "accepted", id);
+    assert.deepEqual(r.urls, [`https://sg.example.com/api/v1/repositories/${id}/ingest`], id);
+  }
+});
+
 test("SPGD-1596: a 404 names the repository id only when one was sent", async () => {
   const withId = recordingFetch(404, '{"message":"nope"}');
   const s1 = sink();
