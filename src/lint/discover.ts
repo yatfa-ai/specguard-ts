@@ -275,7 +275,7 @@ export function selectFiles(
 /**
  * The `--changed` selection: annotated-source files changed against a diff
  * base, ported decision by decision from the Ruby client's `FileSelector`
- * (`specguard-rspec/lib/specguard/rspec/file_selector.rb`) — the code whose
+ * (`specguard-rspec/lib/specguard/client/file_selector.rb`) — the code whose
  * measured defects this port exists to keep from being re-derived:
  *
  *   * The base is the **merge base with the default branch**, never bare
