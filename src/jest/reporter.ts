@@ -79,6 +79,7 @@ export class SpecguardJestReporter {
         shardId: null,
         endpoint: null,
         apiKey: null,
+        repositoryId: null,
         timeoutMs: 10_000,
         outputPath: "log/test_results.jsonl",
         localOutputPath: "log/test_results.local.jsonl",

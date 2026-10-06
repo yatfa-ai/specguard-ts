@@ -2,7 +2,7 @@ import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from "node
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readRunnerEnv, type RunnerEnv } from "./env.js";
-import { deliverRawLine, describeHttpFailure, version } from "./transport.js";
+import { deliverRawLine, describeHttpFailure, repositoryIdProblem, version } from "./transport.js";
 import { renderDelivery, renderListing } from "./ingest-reporter.js";
 
 /**
@@ -636,7 +636,7 @@ function helpText(): string {
     "  -v, --version     Print the version (specguard-ts <version>) and exit",
     "  -h, --help        Print this help and exit",
     "",
-    "Reads SPECGUARD_ENDPOINT, SPECGUARD_API_KEY and SPECGUARD_TIMEOUT.",
+    "Reads SPECGUARD_ENDPOINT, SPECGUARD_API_KEY, SPECGUARD_REPOSITORY_ID (an sga_ agent key) and SPECGUARD_TIMEOUT.",
     "",
     "Exit codes:",
     "  0  every line was accepted — or, with --list, the file was listed",
@@ -721,6 +721,13 @@ export async function run(
     }
     if (env.apiKey === null) {
       stderr.write("specguard-ingest: error: no API key is configured (set SPECGUARD_API_KEY)\n");
+      return EXIT_MISUSE;
+    }
+    // An unusable repository id would fail identically on every line — say so
+    // once, up front, like the missing endpoint/key above.
+    const repositoryProblem = repositoryIdProblem(env);
+    if (repositoryProblem !== null) {
+      stderr.write(`specguard-ingest: error: ${repositoryProblem}\n`);
       return EXIT_MISUSE;
     }
 
@@ -822,7 +829,7 @@ async function deliverLine(
     };
   }
   if (raw.outcome === "http-error") {
-    const detail = describeHttpFailure(raw.status, raw.detail, raw.reasons);
+    const detail = describeHttpFailure(raw.status, raw.detail, raw.reasons, env.repositoryId != null);
     return {
       number,
       status: CONTENT_REFUSAL_CODES.includes(raw.status) ? "refused" : "undelivered",

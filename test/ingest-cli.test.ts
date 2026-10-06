@@ -165,6 +165,41 @@ test("usage: no file, two files, and an unknown option are each a 2 naming the p
   }
 });
 
+test("SPGD-1596: an invalid SPECGUARD_REPOSITORY_ID exits 2 once, before any line is delivered", async () => {
+  const cap = await captureServer(acceptedVerdict);
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n${runLine("2")}\n${runLine("3")}\n`);
+  try {
+    const bad = await runCli([file], cap.url, { SPECGUARD_REPOSITORY_ID: "../x" });
+    assert.equal(bad.code, 2);
+    assert.equal(bad.stderr.match(/SPECGUARD_REPOSITORY_ID/g)?.length, 1, bad.stderr);
+    assert.equal(cap.bodies.length, 0);
+  } finally {
+    rm(file);
+    await cap.close();
+  }
+});
+
+test("SPGD-1596: specguard-ingest delivers to the repository-scoped path when SPECGUARD_REPOSITORY_ID is set", async () => {
+  const paths: string[] = [];
+  const server = http.createServer((req, res) => {
+    paths.push(req.url ?? "");
+    req.resume();
+    req.on("end", () => { res.statusCode = 202; res.end('{"test_run_id":"tr_1"}'); });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const file = tmpFile("q.jsonl", `${runLine("1")}\n`);
+  try {
+    const ok = await runCli([file], url, { SPECGUARD_REPOSITORY_ID: "42" });
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.deepEqual(paths, ["/api/v1/repositories/42/ingest"]);
+  } finally {
+    rm(file);
+    server.close();
+  }
+});
+
 test("usage: no endpoint and no API key are separate 2s naming the separate fixes", async () => {
   const file = tmpFile("q.jsonl", `${runLine("17")}\n`);
   try {
