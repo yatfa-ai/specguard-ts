@@ -100,12 +100,14 @@ async function runNodeTest(
   fixture: string,
   serverUrl: string,
   extraEnv: Record<string, string> = {},
+  extraNodeArgs: string[] = [],
 ): Promise<RunResult> {
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [
         "--test",
+        ...extraNodeArgs,
         `--test-reporter=${reporterPath}`,
         join(fixturesDir, fixture),
       ],
@@ -623,5 +625,58 @@ test("in-process: a mid-run chdir does not change the annotation — the repo ro
     );
   } finally {
     repo.cleanup();
+  }
+});
+
+// A blank value is UNSET to the env reader, and it is how a child shadows a
+// variable the parent suite exported (the parent's CI may set any of these).
+const NO_SHARD_ENV: Record<string, string> = {
+  SPECGUARD_SHARD_ID: "",
+  CI_NODE_INDEX: "",
+  CIRCLE_NODE_INDEX: "",
+  BUILDKITE_PARALLEL_JOB: "",
+};
+
+test("end to end: --test-shard=i/n supplies shard_id as a string index when no env names the shard", async () => {
+  const srv = await captureServer();
+  try {
+    // 4 shards over a 1-file fixture: only the shard that owns the file
+    // reports rows, so run shard 1/1 — the flag is what is under test.
+    await runNodeTest("mixed.test.js", srv.url, NO_SHARD_ENV, ["--test-shard=1/1"]);
+    assert.equal(srv.captured.length, 1);
+    const raw = JSON.stringify(srv.captured[0]!.body);
+    assert.ok(raw.includes('"shard_id":"1"'), raw.slice(0, 300));
+    assert.ok(!raw.includes('"shard_id":1'));
+  } finally {
+    await srv.close();
+  }
+});
+
+test("end to end: SPECGUARD_SHARD_ID and provider keys beat --test-shard", async () => {
+  for (const [name, expected] of [
+    ["SPECGUARD_SHARD_ID", "linux-9"],
+    ["CI_NODE_INDEX", "5"],
+  ] as const) {
+    const srv = await captureServer();
+    try {
+      await runNodeTest("mixed.test.js", srv.url, { ...NO_SHARD_ENV, [name]: expected }, ["--test-shard=1/1"]);
+      assert.equal(srv.captured[0]!.body.shard_id, expected, name);
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+test("end to end: no --test-shard flag, or a malformed one, posts shard_id null", async () => {
+  for (const args of [[], ["--test-shard=x"]]) {
+    const srv = await captureServer();
+    try {
+      await runNodeTest("mixed.test.js", srv.url, NO_SHARD_ENV, args);
+      // A malformed --test-shard may make Node itself refuse to start the
+      // run; if it ran at all, shard_id must be null — never a guess.
+      for (const req of srv.captured) assert.equal(req.body.shard_id, null, args.join(" "));
+    } finally {
+      await srv.close();
+    }
   }
 });

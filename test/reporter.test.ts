@@ -131,3 +131,58 @@ test("a transport that throws anyway does not propagate out of the stream", asyn
   // Reaching here without an exception IS the assertion.
   assert.ok(true);
 });
+
+async function nodeShardIdFor(options: {
+  env: RunnerEnv;
+  execArgv?: readonly string[];
+}): Promise<string | null | undefined> {
+  let sent: Envelope | undefined;
+  const stream = specguardReporter(
+    events([
+      { type: "test:start", data: { name: "leaf", nesting: 0 } },
+      pass("leaf", 5, 0),
+    ]),
+    {
+      env: options.env,
+      execArgv: options.execArgv ?? [],
+      repoRoot: "/repo",
+      transport: {
+        fetchImpl: (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+          sent = JSON.parse(String(init?.body)) as Envelope;
+          return new Response("{}", { status: 202 });
+        }) as unknown as typeof fetch,
+        appendFileImpl: async () => {},
+      },
+    },
+  );
+  for await (const _ of stream) void _;
+  return sent?.shard_id;
+}
+
+const delivering = { endpoint: "https://specguard.example.com", apiKey: "sgk_x" };
+
+test("--test-shard=i/n supplies shard_id (the index only, as a string) when nothing else names the shard", async () => {
+  assert.equal(
+    await nodeShardIdFor({ env: env({ ...delivering, shardId: null }), execArgv: ["--test", "--test-shard=2/4"] }),
+    "2",
+  );
+  assert.equal(
+    await nodeShardIdFor({ env: env({ ...delivering, shardId: null }), execArgv: ["--test-shard", "3/4"] }),
+    "3",
+  );
+});
+
+test("an already-resolved shard_id (SPECGUARD_SHARD_ID or a provider key) beats --test-shard", async () => {
+  assert.equal(
+    await nodeShardIdFor({ env: env({ ...delivering, shardId: "linux-1" }), execArgv: ["--test-shard=2/4"] }),
+    "linux-1",
+  );
+});
+
+test("no --test-shard flag, or a malformed one, leaves shard_id null", async () => {
+  assert.equal(await nodeShardIdFor({ env: env({ ...delivering, shardId: null }), execArgv: ["--test"] }), null);
+  assert.equal(
+    await nodeShardIdFor({ env: env({ ...delivering, shardId: null }), execArgv: ["--test-shard=x"] }),
+    null,
+  );
+});

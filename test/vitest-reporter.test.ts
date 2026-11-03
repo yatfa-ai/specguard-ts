@@ -255,3 +255,67 @@ test("the Vitest <= 3 onFinished hook warns loudly instead of shipping silently"
     process.stderr.write = origWrite;
   }
 });
+
+async function vitestShardIdFor(
+  shardEnv: string | null,
+  vitestInstance: unknown,
+  callOnInit = true,
+): Promise<string | null | undefined> {
+  const { seen } = await runReporterWith(
+    [moduleOf([vitestTest("a", 5)])],
+    { env: env({ shardId: shardEnv }) },
+    callOnInit ? vitestInstance : undefined,
+    callOnInit,
+  );
+  return seen[0]?.body.shard_id;
+}
+
+/** Like runReporter, but fires `onInit(vitest)` first the way Vitest does. */
+async function runReporterWith(
+  modules: VitestTestModule[],
+  options: Partial<VitestReporterOptions>,
+  vitestInstance: unknown,
+  callOnInit: boolean,
+): Promise<{ seen: Seen[] }> {
+  const seen: Seen[] = [];
+  const reporter = new SpecguardVitestReporter({
+    repoRoot: pkgRoot,
+    transport: {
+      fetchImpl: (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        seen.push({ url: String(url), body: JSON.parse(String(init?.body)) as Envelope });
+        return new Response("{}", { status: 202 });
+      }) as unknown as typeof fetch,
+      appendFileImpl: async () => {},
+    },
+    ...options,
+  });
+  if (callOnInit) reporter.onInit(vitestInstance);
+  await reporter.onTestRunEnd(modules);
+  return { seen };
+}
+
+test("onInit reads vitest.config.shard.index into shard_id (index only, as a string)", async () => {
+  assert.equal(await vitestShardIdFor(null, { config: { shard: { index: 2, count: 4 } } }), "2");
+});
+
+test("an already-resolved shard_id beats vitest.config.shard", async () => {
+  assert.equal(await vitestShardIdFor("macos-1", { config: { shard: { index: 2, count: 4 } } }), "macos-1");
+});
+
+test("no vitest.config.shard, a malformed one, or no onInit at all leaves shard_id null and never throws", async () => {
+  for (const instance of [
+    undefined,
+    null,
+    "nope",
+    {},
+    { config: null },
+    { config: {} },
+    { config: { shard: undefined } },
+    { config: { shard: null } },
+    { config: { shard: { index: "x", count: 4 } } },
+    { config: { shard: { index: 0, count: 4 } } },
+  ]) {
+    assert.equal(await vitestShardIdFor(null, instance), null, JSON.stringify(instance));
+  }
+  assert.equal(await vitestShardIdFor(null, undefined, false), null);
+});

@@ -577,3 +577,54 @@ test("no API key: the run is written to the LOCAL sink, the replay queue is not 
     await srv.close();
   }
 });
+
+// A blank value is UNSET to the env reader, and it is how a child shadows a
+// variable the parent suite exported (the parent's CI may set any of these).
+const NO_SHARD_ENV: Record<string, string> = {
+  SPECGUARD_SHARD_ID: "",
+  CI_NODE_INDEX: "",
+  CIRCLE_NODE_INDEX: "",
+  BUILDKITE_PARALLEL_JOB: "",
+};
+
+test("end to end: --shard=i/n supplies shard_id as a string index when no env names the shard", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    await runJest("jest.config.mjs", srv.url, NO_SHARD_ENV, "fixtures/jest/mixed.test.js", ["--shard=1/1"]);
+    assert.equal(srv.captured.length, 1);
+    const raw = JSON.stringify(srv.captured[0]!.body);
+    assert.ok(raw.includes('"shard_id":"1"'), raw.slice(0, 300));
+    assert.ok(!raw.includes('"shard_id":1'));
+  } finally {
+    await srv.close();
+  }
+});
+
+test("end to end: SPECGUARD_SHARD_ID and provider keys beat --shard", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  for (const [name, expected] of [
+    ["SPECGUARD_SHARD_ID", "linux-9"],
+    ["CI_NODE_INDEX", "5"],
+  ] as const) {
+    const srv = await captureServer();
+    try {
+      await runJest("jest.config.mjs", srv.url, { ...NO_SHARD_ENV, [name]: expected }, "fixtures/jest/mixed.test.js", ["--shard=1/1"]);
+      assert.equal(srv.captured[0]!.body.shard_id, expected, name);
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+test("end to end: no --shard flag posts shard_id null", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    await runJest("jest.config.mjs", srv.url, NO_SHARD_ENV, "fixtures/jest/mixed.test.js");
+    assert.equal(srv.captured.length, 1);
+    assert.equal(srv.captured[0]!.body.shard_id, null);
+  } finally {
+    await srv.close();
+  }
+});

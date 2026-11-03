@@ -66,6 +66,7 @@ interface Seen {
 async function runReporter(
   results: JestRunResult,
   options: Partial<JestReporterOptions> = {},
+  globalConfig: unknown = {},
 ): Promise<{ seen: Seen[]; sink: string[]; stderr: string[] }> {
   const seen: Seen[] = [];
   const sink: string[] = [];
@@ -76,7 +77,7 @@ async function runReporter(
     return true;
   }) as typeof process.stderr.write;
   try {
-    const reporter = new SpecguardJestReporter({}, {
+    const reporter = new SpecguardJestReporter(globalConfig, {
       env: env(),
       repoRoot: pkgRoot,
       transport: {
@@ -261,4 +262,43 @@ test("onRunStart resets the run clock: each watch rerun measures its own duratio
   assert.equal(seen.length, 1);
   const duration = seen[0]!.body.duration_seconds;
   assert.ok(duration !== null && duration < 10, `duration ${String(duration)} must be measured from onRunStart, not construction`);
+});
+
+test("globalConfig.shard.shardIndex supplies shard_id (index only, as a string) when nothing else names the shard", async () => {
+  const { seen } = await runReporter(
+    resultsOf([jestAssertion("a", 1)]),
+    { env: env({ shardId: null }) },
+    { shard: { shardIndex: 2, shardCount: 4 } },
+  );
+  assert.equal(seen[0]!.body.shard_id, "2");
+});
+
+test("an already-resolved shard_id beats globalConfig.shard", async () => {
+  const { seen } = await runReporter(
+    resultsOf([jestAssertion("a", 1)]),
+    { env: env({ shardId: "macos-1" }) },
+    { shard: { shardIndex: 2, shardCount: 4 } },
+  );
+  assert.equal(seen[0]!.body.shard_id, "macos-1");
+});
+
+test("no globalConfig.shard, or a malformed one, leaves shard_id null and never throws", async () => {
+  for (const globalConfig of [
+    undefined,
+    null,
+    "nope",
+    {},
+    { shard: null },
+    { shard: {} },
+    { shard: { shardIndex: "x", shardCount: 4 } },
+    { shard: { shardIndex: 0, shardCount: 4 } },
+    { shard: "2/4" },
+  ]) {
+    const { seen } = await runReporter(
+      resultsOf([jestAssertion("a", 1)]),
+      { env: env({ shardId: null }) },
+      globalConfig,
+    );
+    assert.equal(seen[0]!.body.shard_id, null, JSON.stringify(globalConfig));
+  }
 });
