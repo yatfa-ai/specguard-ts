@@ -79,6 +79,91 @@ function git(env: Record<string, string | undefined>, args: string[]): string | 
 }
 
 /**
+ * A runner-native shard index (Vitest/Jest `--shard=i/n`, node:test
+ * `--test-shard=i/n`) as the string `shard_id` carries, or `null` when the
+ * value is absent or malformed.
+ *
+ * Only a positive integer qualifies — the runners number their shards from 1
+ * — and a number is stringified here, at the edge, because the endpoint
+ * refuses a JSON number for `shard_id`. The INDEX alone is sent, never
+ * `"2/4"`: the count rides no wire field, and a composite id would make a
+ * suite's shard names depend on how many shards it happened to be split
+ * into. Never throws, whatever it is handed.
+ */
+export function nativeShardIndex(value: unknown): string | null {
+  try {
+    let text: string;
+    if (typeof value === "number") {
+      if (!Number.isSafeInteger(value)) return null;
+      text = String(value);
+    } else if (typeof value === "string") {
+      text = value.trim();
+    } else {
+      return null;
+    }
+    if (!/^[0-9]+$/.test(text)) return null;
+    const index = Number(text);
+    if (!Number.isSafeInteger(index) || index < 1) return null;
+    return String(index);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The index out of a node:test `--test-shard=i/n` (or space-separated
+ * `--test-shard i/n`) flag in `execArgv`, or `null` when there is no such
+ * flag or its value is not `<index>/<count>` with `1 <= index <= count`.
+ * The first occurrence wins, matching how Node reads a repeated flag's
+ * value. Never throws.
+ */
+export function shardIndexFromTestShardFlag(
+  execArgv: readonly string[] = process.execArgv,
+): string | null {
+  try {
+    for (let i = 0; i < execArgv.length; i++) {
+      const arg = execArgv[i];
+      if (typeof arg !== "string") continue;
+      let value: string | undefined;
+      if (arg.startsWith("--test-shard=")) value = arg.slice("--test-shard=".length);
+      else if (arg === "--test-shard") value = execArgv[i + 1];
+      else continue;
+      if (typeof value !== "string") return null;
+      const match = /^([0-9]+)\/([0-9]+)$/.exec(value.trim());
+      if (match === null) return null;
+      const index = nativeShardIndex(match[1]);
+      const count = nativeShardIndex(match[2]);
+      if (index === null || count === null || Number(index) > Number(count)) return null;
+      return index;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The runner-native shard fallback: `env` with `shardId` filled from the
+ * runner's own `--shard` index, but ONLY where nothing else named the shard.
+ * `shardId` is already resolved from `SPECGUARD_SHARD_ID` and the provider
+ * keys by the time it gets here, so a non-null value is an explicit choice
+ * (a composite `${os}-${shard}` id, say) and is returned untouched —
+ * precedence is `SPECGUARD_SHARD_ID` > provider keys > runner-native.
+ * Absent or malformed native values leave `shardId` as it was.
+ */
+export function withNativeShard(env: RunnerEnv, native: unknown): RunnerEnv {
+  if (env.shardId !== null) return env;
+  const index = nativeShardIndex(native);
+  return index === null ? env : { ...env, shardId: index };
+}
+
+/** What a reporter learned from its runner, passed to {@link readRunnerEnv}. */
+export interface RunnerHints {
+  /** The runner's own shard index (`--shard=i/n`); lowest-precedence `shard_id`. */
+  shardIndex?: unknown;
+}
+
+/**
  * Resolve the fixed list of environment variables the client reads. The
  * branch list is the Ruby client's `BRANCH_KEYS` plus `CI_COMMIT_BRANCH` —
  * a key the Ruby client does not read, kept so a GitLab run resolves its
@@ -87,12 +172,16 @@ function git(env: Record<string, string | undefined>, args: string[]): string | 
  * keep the same meanings; when the Ruby list grows, this list grows with
  * it — superset, never equality. Nothing else is read.
  *
+ * `shardId` falls back to the runner's own shard index (`hints.shardIndex`)
+ * only when `SPECGUARD_SHARD_ID` and every provider key are unset.
+ *
  * `ciRunId` and `shardId` are stringified HERE, at the edge, whatever they
  * arrived as: `JSON.stringify` emits a bare `0` for a number and the endpoint
  * refuses a JSON number for either field — `0` and `"0"` key different shards.
  */
 export function readRunnerEnv(
   proc: Pick<NodeJS.Process, "env"> = process,
+  hints: RunnerHints = {},
 ): RunnerEnv {
   const env = proc.env as Record<string, string | undefined>;
 
@@ -136,7 +225,7 @@ export function readRunnerEnv(
     firstEnv(env, ["SPECGUARD_TIMEOUT"]) ?? "10",
   );
 
-  return {
+  return withNativeShard({
     commitSha,
     branch,
     ciRunId: ciRunIdRaw === null ? null : String(ciRunIdRaw),
@@ -151,5 +240,5 @@ export function readRunnerEnv(
     outputPath: firstEnv(env, ["SPECGUARD_OUTPUT_PATH"]) ?? "log/test_results.jsonl",
     localOutputPath:
       firstEnv(env, ["SPECGUARD_LOCAL_OUTPUT_PATH"]) ?? "log/test_results.local.jsonl",
-  };
+  }, hints.shardIndex);
 }

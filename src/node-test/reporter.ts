@@ -2,7 +2,12 @@ import { RunCollector } from "./collector.js";
 import type { TestEventData } from "./collector.js";
 import { annotateRows } from "./annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
-import { readRunnerEnv, type RunnerEnv } from "../core/env.js";
+import {
+  readRunnerEnv,
+  shardIndexFromTestShardFlag,
+  withNativeShard,
+  type RunnerEnv,
+} from "../core/env.js";
 import { deliver, type TransportDeps } from "../core/transport.js";
 
 export interface ReporterEvent {
@@ -21,6 +26,8 @@ export interface ReporterOptions {
   repoRoot?: string;
   /** Transport injection (tests). */
   transport?: TransportDeps;
+  /** Overrides `process.execArgv`, where `--test-shard=i/n` is read (tests). */
+  execArgv?: readonly string[];
 }
 
 /**
@@ -41,7 +48,7 @@ export async function* specguardReporter(
   source: AsyncIterable<ReporterEvent>,
   options: ReporterOptions = {},
 ): AsyncGenerator<string> {
-  const env = options.env ?? readRunnerEnv();
+  const env = resolveEnv(options);
   // Bind the repo root ONCE, at run start, and thread that same value into
   // `finish` — mirroring src/jest/reporter.ts and src/vitest/reporter.ts.
   // Reading the cwd again at finish time would let a mid-run chdir
@@ -75,6 +82,19 @@ export async function* specguardReporter(
 }
 
 export default specguardReporter;
+
+/**
+ * The run's env, with `--test-shard=i/n` from Node's own argv as the
+ * lowest-precedence `shard_id`. The shard flag is read from `execArgv`
+ * because the reporter runs in the process that was started with it.
+ * Never throws.
+ */
+function resolveEnv(options: ReporterOptions): RunnerEnv {
+  const nativeShard = shardIndexFromTestShardFlag(options.execArgv ?? process.execArgv);
+  return options.env !== undefined
+    ? withNativeShard(options.env, nativeShard)
+    : readRunnerEnv(process, { shardIndex: nativeShard });
+}
 
 /**
  * Ship what was collected. Awaited before the reporter's stream completes so

@@ -4,7 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { readRunnerEnv } from "../src/core/env.js";
+import {
+  nativeShardIndex,
+  readRunnerEnv,
+  shardIndexFromTestShardFlag,
+  withNativeShard,
+} from "../src/core/env.js";
 
 function envWith(overrides: Record<string, string>): NodeJS.ProcessEnv {
   return { ...overrides } as NodeJS.ProcessEnv;
@@ -368,4 +373,99 @@ test("SPGD-1596: SPECGUARD_REPOSITORY_ID is read trimmed; unset or blank is null
   assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a" }) }).repositoryId, null);
   assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_REPOSITORY_ID: "  " }) }).repositoryId, null);
   assert.equal(readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "a", SPECGUARD_REPOSITORY_ID: " 42 " }) }).repositoryId, "42");
+});
+
+// --- runner-native shard index (SPGD-2035) -------------------------------
+
+test("a runner-native shard index is the shard_id fallback, stringified, when nothing else names the shard", () => {
+  const e = readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "abc" }) }, { shardIndex: 2 });
+  assert.equal(e.shardId, "2");
+  assert.equal(typeof e.shardId, "string");
+});
+
+test("precedence is SPECGUARD_SHARD_ID > provider keys > runner-native", () => {
+  const provider = ["CI_NODE_INDEX", "CIRCLE_NODE_INDEX", "BUILDKITE_PARALLEL_JOB"];
+  for (const key of provider) {
+    const e = readRunnerEnv(
+      { env: envWith({ SPECGUARD_COMMIT_SHA: "abc", [key]: "7" }) },
+      { shardIndex: 2 },
+    );
+    assert.equal(e.shardId, "7", `${key} must beat the runner-native index`);
+  }
+  const explicit = readRunnerEnv(
+    {
+      env: envWith({
+        SPECGUARD_COMMIT_SHA: "abc",
+        SPECGUARD_SHARD_ID: "linux-3",
+        CI_NODE_INDEX: "7",
+      }),
+    },
+    { shardIndex: 2 },
+  );
+  assert.equal(explicit.shardId, "linux-3");
+});
+
+test("a blank SPECGUARD_SHARD_ID is unset, so the runner-native index applies", () => {
+  const e = readRunnerEnv(
+    { env: envWith({ SPECGUARD_COMMIT_SHA: "abc", SPECGUARD_SHARD_ID: "   " }) },
+    { shardIndex: 4 },
+  );
+  assert.equal(e.shardId, "4");
+});
+
+test("no runner-native index leaves shard_id null exactly as before", () => {
+  const e = readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "abc" }) });
+  assert.equal(e.shardId, null);
+  for (const hint of [undefined, null, "", "x", "2/4", 0, -1, 1.5, NaN, {}, []]) {
+    assert.equal(
+      readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "abc" }) }, { shardIndex: hint }).shardId,
+      null,
+      `${JSON.stringify(hint)} must yield no shard_id`,
+    );
+  }
+});
+
+test("nativeShardIndex accepts only a positive integer and stringifies it", () => {
+  assert.equal(nativeShardIndex(1), "1");
+  assert.equal(nativeShardIndex("12"), "12");
+  assert.equal(nativeShardIndex(" 3 "), "3");
+  assert.equal(nativeShardIndex("007"), "7");
+  for (const bad of [0, "0", -2, "-2", 2.5, "2.5", "1e2", "", "two", null, undefined, true, Infinity]) {
+    assert.equal(nativeShardIndex(bad), null, `${String(bad)} is not a shard index`);
+  }
+});
+
+test("withNativeShard never overrides an already-resolved shard_id", () => {
+  const base = readRunnerEnv({ env: envWith({ SPECGUARD_COMMIT_SHA: "abc", SPECGUARD_SHARD_ID: "0" }) });
+  assert.equal(withNativeShard(base, 3), base);
+  assert.equal(withNativeShard(base, 3).shardId, "0");
+});
+
+test("shardIndexFromTestShardFlag reads --test-shard=i/n and --test-shard i/n, index only", () => {
+  assert.equal(shardIndexFromTestShardFlag(["--test", "--test-shard=2/4"]), "2");
+  assert.equal(shardIndexFromTestShardFlag(["--test", "--test-shard", "3/4"]), "3");
+  assert.equal(shardIndexFromTestShardFlag(["--test-shard=1/1"]), "1");
+  // First occurrence wins.
+  assert.equal(shardIndexFromTestShardFlag(["--test-shard=1/4", "--test-shard=2/4"]), "1");
+});
+
+test("shardIndexFromTestShardFlag yields null for absent or malformed flags", () => {
+  for (const argv of [
+    [],
+    ["--test"],
+    ["--test-shard=x"],
+    ["--test-shard=2"],
+    ["--test-shard=2/"],
+    ["--test-shard=/4"],
+    ["--test-shard=0/4"],
+    ["--test-shard=5/4"],
+    ["--test-shard=-1/4"],
+    ["--test-shard=a/b"],
+    ["--test-shard="],
+    ["--test-shard"],
+    ["--test-shard", "--test"],
+    ["--test-shard-extra=2/4"],
+  ]) {
+    assert.equal(shardIndexFromTestShardFlag(argv), null, JSON.stringify(argv));
+  }
 });

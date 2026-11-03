@@ -1,7 +1,7 @@
 import { JestCollector } from "./collector.js";
 import { annotateRows } from "../node-test/annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
-import { readRunnerEnv, type RunnerEnv } from "../core/env.js";
+import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
 import { deliver, type TransportDeps } from "../core/transport.js";
 import type { ValidatorDeps } from "../core/validator.js";
 
@@ -22,6 +22,21 @@ export interface JestReporterOptions {
   transport?: TransportDeps;
   /** Validator resolution injection for the annotation pass (tests). */
   validator?: ValidatorDeps;
+}
+
+/**
+ * Jest's `--shard=i/n` index: `globalConfig.shard.shardIndex`, present only
+ * when the flag was passed. Never throws.
+ */
+function jestShardIndex(globalConfig: unknown): unknown {
+  try {
+    if (globalConfig === null || typeof globalConfig !== "object") return null;
+    const shard = (globalConfig as { shard?: unknown }).shard;
+    if (shard === null || typeof shard !== "object") return null;
+    return (shard as { shardIndex?: unknown }).shardIndex ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -57,7 +72,7 @@ export class SpecguardJestReporter {
   private startedAtMs: number;
 
   constructor(
-    _globalConfig?: unknown,
+    globalConfig?: unknown,
     options?: JestReporterOptions,
     ..._rest: unknown[]
   ) {
@@ -69,7 +84,14 @@ export class SpecguardJestReporter {
       options !== null && typeof options === "object" ? options : ({} as JestReporterOptions);
     let env: RunnerEnv;
     try {
-      env = this.options.env ?? readRunnerEnv();
+      // `globalConfig.shard` exists only under `--shard=i/n`; absent or
+      // malformed yields no hint. Read defensively — this constructor must
+      // never throw.
+      const nativeShard = jestShardIndex(globalConfig);
+      env =
+        this.options.env !== undefined
+          ? withNativeShard(this.options.env, nativeShard)
+          : readRunnerEnv(process, { shardIndex: nativeShard });
     } catch {
       // readRunnerEnv never throws on its own; this is the backstop.
       env = {

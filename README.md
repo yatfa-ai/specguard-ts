@@ -630,7 +630,20 @@ quarter each. Every supported provider publishes a build id, so a sharded job ne
 | Field | Resolved from |
 | --- | --- |
 | `ci_run_id` | `SPECGUARD_RUN_ID`, else `GITHUB_RUN_ID`, `CI_PIPELINE_ID`, `CIRCLE_WORKFLOW_ID`, `BUILDKITE_BUILD_ID`, `BUILD_TAG` |
-| `shard_id` | `SPECGUARD_SHARD_ID`, else `CI_NODE_INDEX`, `CIRCLE_NODE_INDEX`, `BUILDKITE_PARALLEL_JOB` |
+| `shard_id` | `SPECGUARD_SHARD_ID`, else `CI_NODE_INDEX`, `CIRCLE_NODE_INDEX`, `BUILDKITE_PARALLEL_JOB`, else the runner's own shard index (below) |
+
+**The runner's own `--shard` flag is the last fallback.** When none of the keys above is set, each reporter
+reads the index of the shard the runner was started with and sends it as `shard_id`:
+
+| Runner | Flag | Read from |
+| --- | --- | --- |
+| Vitest | `--shard=2/4` | `vitest.config.shard.index` (the reporter's `onInit`) |
+| Jest | `--shard=2/4` | `globalConfig.shard.shardIndex` |
+| `node:test` | `--test-shard=2/4` (or `--test-shard 2/4`) | `process.execArgv` |
+
+Only the **index** is sent (`"2"`, never `"2/4"`, and always a string). Without the flag — or with a value
+that is not `<index>/<count>` — `shard_id` stays `null`, exactly as before. The precedence is
+`SPECGUARD_SHARD_ID` > the provider keys > the runner's flag, so an existing explicit id is never changed.
 
 `ci_run_id` and `shard_id` are refused by the endpoint as JSON **numbers** rather than coerced, and this
 matters more in TypeScript than it did in Ruby: a shard index composed in code is a `number` and
@@ -673,7 +686,8 @@ a second delivery. (For the same reason `GITHUB_RUN_ID` — not `GITHUB_RUN_ATTE
 "re-run all jobs" delivers inside the same run id, so shards replace their numbers instead of doubling
 the denominator.)
 
-**GitHub Actions `matrix:` needs a line of config** — it exports no per-leg index:
+**GitHub Actions `matrix:`** exports no per-leg index, so a suite sharded with the runner's own
+`--shard` / `--test-shard` flag is named by that flag. Anything else needs a line of config:
 
 ```yaml
 strategy:
@@ -684,6 +698,12 @@ steps:
     env:
       SPECGUARD_SHARD_ID: ${{ matrix.shard }}
 ```
+
+**Set `SPECGUARD_SHARD_ID` explicitly for a multi-dimension matrix.** The runner's index is only the
+position within one split, so an `os` × `shard` matrix inside one run gives two legs the same index, and
+they would **replace each other** instead of adding up. Name the leg yourself (for example
+`SPECGUARD_SHARD_ID: ${{ matrix.os }}-${{ matrix.shard }}`); `SPECGUARD_SHARD_ID` always has top precedence,
+which is also why this applies to `CI_NODE_INDEX` when it repeats across dimensions.
 
 ## The wire contract
 

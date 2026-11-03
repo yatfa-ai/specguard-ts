@@ -1,7 +1,7 @@
 import { VitestCollector } from "./collector.js";
 import { annotateRows } from "../node-test/annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
-import { readRunnerEnv, type RunnerEnv } from "../core/env.js";
+import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
 import { deliver, type TransportDeps } from "../core/transport.js";
 import type { ValidatorDeps } from "../core/validator.js";
 
@@ -57,7 +57,7 @@ export interface VitestReporterOptions {
  */
 export class SpecguardVitestReporter {
   private readonly options: VitestReporterOptions;
-  private readonly env: RunnerEnv;
+  private env: RunnerEnv;
   private startedAtMs: number;
 
   constructor(options: VitestReporterOptions = {}) {
@@ -86,6 +86,22 @@ export class SpecguardVitestReporter {
     }
     this.env = env;
     this.startedAtMs = Date.now();
+  }
+
+  /**
+   * Vitest's init hook, handed the Vitest instance. Its resolved config
+   * carries `shard: { index, count }` only under `--shard=i/n`; the index
+   * becomes the lowest-precedence `shard_id`. NEVER THROWS — an absent or
+   * malformed shard leaves the env exactly as the constructor resolved it.
+   */
+  onInit(vitest?: unknown): void {
+    try {
+      const config = (vitest as { config?: { shard?: { index?: unknown } | null } } | null)
+        ?.config;
+      this.env = withNativeShard(this.env, config?.shard?.index);
+    } catch {
+      // Never let a surprising instance shape fail the suite.
+    }
   }
 
   /** Watch mode: each rerun is a run; its duration is measured from here. */
