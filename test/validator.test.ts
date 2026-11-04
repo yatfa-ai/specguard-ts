@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   resolveValidator,
   VALIDATE_INTENT_ENV_VAR,
@@ -153,6 +154,57 @@ test("a prebuilt binary with a mismatched contract is refused, not made availabl
   const r = resolveValidator({ env: {}, prebuiltResolver: () => stub.path });
   assert.ok(r.state === "unavailable");
   assert.equal(r.code, VALIDATOR_UNAVAILABLE.SCHEMA_CONTRACT_MISMATCH);
+});
+
+test("a prebuilt resolver naming a missing, non-file or non-executable path is unavailable(not-executable), not available", () => {
+  // checkBinary's isExecutableFile guard is the only thing standing between a
+  // nonexistent prebuilt path and state "available" (the env-override branch
+  // pre-checks the path itself and reports a different code).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-validator-"));
+  const noExec = path.join(dir, "validate-intent");
+  fs.writeFileSync(noExec, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+  fs.chmodSync(noExec, 0o644);
+  const cases: Array<[string, string]> = [
+    ["a missing path", path.join(dir, "does-not-exist", "validate-intent")],
+    ["a directory", dir],
+    ["a file without the exec bit", noExec],
+  ];
+  for (const [label, target] of cases) {
+    const r = resolveValidator({ env: {}, prebuiltResolver: () => target });
+    assert.ok(r.state === "unavailable", `${label}: expected unavailable, got ${r.state}`);
+    assert.equal(r.code, VALIDATOR_UNAVAILABLE.NOT_EXECUTABLE, label);
+    assert.notEqual(r.code, VALIDATOR_UNAVAILABLE.OVERRIDE_NOT_EXECUTABLE, label);
+    assert.match(r.reason, /could not be executed/, label);
+    assert.ok(r.reason.includes(target), `${label}: reason names the path`);
+  }
+});
+
+test("a prebuilt resolver that throws degrades to unavailable(no-binary) instead of throwing", () => {
+  const r = resolveValidator({
+    env: {},
+    prebuiltResolver: () => {
+      throw new Error("boom");
+    },
+  });
+  assert.ok(r.state === "unavailable");
+  assert.equal(r.code, VALIDATOR_UNAVAILABLE.NO_BINARY);
+});
+
+test("a prebuilt resolver returning a blank string counts as no prebuilt: unavailable(no-binary)", () => {
+  const r = resolveValidator({ env: {}, prebuiltResolver: () => "" });
+  assert.ok(r.state === "unavailable");
+  assert.equal(r.code, VALIDATOR_UNAVAILABLE.NO_BINARY);
+});
+
+test("the README's published unavailable codes are exactly Object.values(VALIDATOR_UNAVAILABLE)", () => {
+  // The compiled test runs from .test-build/test/, so the package root is two
+  // levels up (same convention as test/gem-rename-pin.test.ts).
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const readme = fs.readFileSync(path.join(here, "..", "..", "README.md"), "utf8");
+  const item = readme.match(/3\. \*\*`unavailable`\*\*([\s\S]*?)(?:\n\n|$)/);
+  assert.ok(item, "README Validator resolution step 3 not found");
+  const documented = [...(item[1] ?? "").matchAll(/`([a-z][a-z-]*)`/g)].map((m) => m[1]);
+  assert.deepEqual([...documented].sort(), Object.values(VALIDATOR_UNAVAILABLE).sort());
 });
 
 test("telemetry is unaffected by every unavailable state: the node-test reporter still constructs and runs", async () => {
