@@ -113,6 +113,20 @@ test("the reporter collects rows and POSTs one envelope through the transport", 
   assert.equal(typeof body.duration_seconds, "number");
 });
 
+test("three same-titled tests in one file ship three distinct ids and the failing one keeps its outcome", async () => {
+  const { seen } = await runReporter(resultsOf([
+    jestAssertion("adds", 5),
+    { ...jestAssertion("adds", 7), status: "failed" },
+    jestAssertion("adds", 9),
+  ]));
+  assert.equal(seen.length, 1);
+  const specs = seen[0]!.body.specs;
+  assert.equal(specs.length, 3);
+  assert.equal(new Set(specs.map((s) => s.id)).size, 3);
+  assert.deepEqual(specs.map((s) => s.outcome), ["passed", "failed", "passed"]);
+  assert.ok(specs.every((s) => s.name === "adds"));
+});
+
 test("a run that reported zero tests POSTs nothing and writes nothing", async () => {
   const { seen, sink } = await runReporter(resultsOf([]));
   assert.equal(seen.length, 0);
