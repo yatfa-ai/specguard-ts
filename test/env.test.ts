@@ -469,3 +469,134 @@ test("shardIndexFromTestShardFlag yields null for absent or malformed flags", ()
     assert.equal(shardIndexFromTestShardFlag(argv), null, JSON.stringify(argv));
   }
 });
+
+// ---------------------------------------------------------------------------
+// GitHub pull_request runs: the source branch and the pushed head commit
+// ---------------------------------------------------------------------------
+
+const MERGE_SHA = "a".repeat(40);
+const HEAD_SHA = "b".repeat(40);
+
+function eventFile(contents: string | object): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sg-event-"));
+  const file = path.join(dir, "event.json");
+  fs.writeFileSync(file, typeof contents === "string" ? contents : JSON.stringify(contents));
+  return file;
+}
+
+function payload(headRepo: string | null, baseRepo = "acme/app", sha: unknown = HEAD_SHA) {
+  return {
+    pull_request: {
+      head: { sha, repo: headRepo === null ? null : { full_name: headRepo } },
+      base: { repo: { full_name: baseRepo } },
+    },
+  };
+}
+
+function prEnv(
+  eventName: string,
+  eventPath: string | undefined,
+  extra: Record<string, string> = {},
+): NodeJS.ProcessEnv {
+  return envWith({
+    PATH: "/nonexistent",
+    GITHUB_EVENT_NAME: eventName,
+    GITHUB_SHA: MERGE_SHA,
+    GITHUB_REF_NAME: "123/merge",
+    GITHUB_HEAD_REF: "feature/login",
+    GITHUB_BASE_REF: "main",
+    ...(eventPath === undefined ? {} : { GITHUB_EVENT_PATH: eventPath }),
+    ...extra,
+  });
+}
+
+test("a same-repo pull_request run resolves the source branch and the pushed head sha", () => {
+  const e = readRunnerEnv({ env: prEnv("pull_request", eventFile(payload("acme/app"))) });
+  assert.equal(e.branch, "feature/login");
+  assert.equal(e.commitSha, HEAD_SHA);
+});
+
+test("a same-repo pull_request_target run resolves the source branch and the pushed head sha", () => {
+  const e = readRunnerEnv({
+    env: prEnv("pull_request_target", eventFile(payload("acme/app"))),
+  });
+  assert.equal(e.branch, "feature/login");
+  assert.equal(e.commitSha, HEAD_SHA);
+});
+
+test("a fork pull_request keeps the merge ref and the merge sha", () => {
+  for (const headRepo of ["contrib/app", null]) {
+    const e = readRunnerEnv({
+      env: prEnv("pull_request", eventFile(payload(headRepo)), { GITHUB_HEAD_REF: "main" }),
+    });
+    assert.equal(e.branch, "123/merge");
+    assert.equal(e.commitSha, MERGE_SHA);
+  }
+});
+
+test("a push run is unchanged even when GITHUB_HEAD_REF and an event file are present", () => {
+  const e = readRunnerEnv({
+    env: prEnv("push", eventFile(payload("acme/app")), { GITHUB_REF_NAME: "main" }),
+  });
+  assert.equal(e.branch, "main");
+  assert.equal(e.commitSha, MERGE_SHA);
+});
+
+test("a missing, garbled, oversized or non-object event payload never throws and falls back", () => {
+  const cases: Array<string | undefined> = [
+    undefined,
+    "/nonexistent/event.json",
+    eventFile("{not json"),
+    eventFile("null"),
+    eventFile(JSON.stringify({ pull_request: "nope" })),
+    eventFile(JSON.stringify({ pad: "x".repeat(1024 * 1024 + 1), ...payload("acme/app") })),
+    os.tmpdir(), // a directory: readFileSync throws
+  ];
+  for (const eventPath of cases) {
+    const e = readRunnerEnv({ env: prEnv("pull_request", eventPath) });
+    assert.equal(e.commitSha, MERGE_SHA, `sha fallback for ${eventPath}`);
+    assert.equal(e.branch, "123/merge", `branch fallback for ${eventPath}`);
+  }
+});
+
+test("a same-repo payload whose head sha is not 40-hex keeps GITHUB_SHA but still names the source branch", () => {
+  for (const sha of ["abc123", `${"b".repeat(39)}z`, 42, null]) {
+    const e = readRunnerEnv({
+      env: prEnv("pull_request", eventFile(payload("acme/app", "acme/app", sha))),
+    });
+    assert.equal(e.commitSha, MERGE_SHA);
+    assert.equal(e.branch, "feature/login");
+  }
+});
+
+test("explicit SPECGUARD_COMMIT_SHA and SPECGUARD_BRANCH keep absolute precedence on a pull_request", () => {
+  const file = eventFile(payload("acme/app"));
+  const both = readRunnerEnv({
+    env: prEnv("pull_request", file, {
+      SPECGUARD_COMMIT_SHA: "explicit-sha",
+      SPECGUARD_BRANCH: "explicit-branch",
+    }),
+  });
+  assert.equal(both.commitSha, "explicit-sha");
+  assert.equal(both.branch, "explicit-branch");
+
+  // Each is independent: setting one leaves the other to the payload.
+  const shaOnly = readRunnerEnv({
+    env: prEnv("pull_request", file, { SPECGUARD_COMMIT_SHA: "explicit-sha" }),
+  });
+  assert.equal(shaOnly.commitSha, "explicit-sha");
+  assert.equal(shaOnly.branch, "feature/login");
+
+  const blank = readRunnerEnv({
+    env: prEnv("pull_request", file, { SPECGUARD_COMMIT_SHA: "  ", SPECGUARD_BRANCH: "" }),
+  });
+  assert.equal(blank.commitSha, HEAD_SHA);
+  assert.equal(blank.branch, "feature/login");
+});
+
+test("ci_run_id is untouched by the pull_request resolution", () => {
+  const e = readRunnerEnv({
+    env: prEnv("pull_request", eventFile(payload("acme/app")), { GITHUB_RUN_ID: "17442" }),
+  });
+  assert.equal(e.ciRunId, "17442");
+});
