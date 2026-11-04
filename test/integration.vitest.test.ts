@@ -298,11 +298,27 @@ test("MEASURED: the @intent comment sits exactly one line above location.line �
   }
 });
 
-test("MEASURED: without includeTaskLocation every row is dropped with a warning and nothing POSTs", async (t) => {
+test("MEASURED: with only the reporter added (default config) rows POST with correct line numbers", async (t) => {
   if (vitestBin === null) return t.skip("vitest not installed — adapter e2e skipped (optional peer)");
   const srv = await captureServer();
   try {
     const result = await runVitest("no-location.config.mts", srv.url);
+    assert.equal(srv.captured.length, 1, result.stderr);
+    const byName = new Map(srv.captured[0]!.body.specs.map((s) => [s.name, s]));
+    assert.equal(byName.get("passing suite > child ok")?.line_number, fixtureLineOf("mixed.test.ts", '  test("child ok"'));
+    assert.equal(byName.get("passing suite > child failing")?.line_number, fixtureLineOf("mixed.test.ts", '  test("child failing"'));
+    assert.equal(byName.get("passing suite > inner suite > grandchild ok")?.line_number, fixtureLineOf("mixed.test.ts", '    test("grandchild ok"'));
+    assert.ok(!/dropped \d+ test result/.test(result.stderr), result.stderr);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("MEASURED: when the config cannot be flipped (frozen) every row is dropped with a warning and nothing POSTs", async (t) => {
+  if (vitestBin === null) return t.skip("vitest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    const result = await runVitest("frozen-config.config.mts", srv.url);
     assert.equal(srv.captured.length, 0, "no line numbers -> no rows -> no POST");
     assert.match(result.stderr, /dropped \d+ test result/);
     assert.match(result.stderr, /includeTaskLocation/);
