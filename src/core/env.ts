@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 
 export interface RunnerEnv {
   commitSha: string | null;
@@ -73,6 +74,48 @@ function git(env: Record<string, string | undefined>, args: string[]): string | 
       .toString()
       .trim();
     return out === "" ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+/** Largest `GITHUB_EVENT_PATH` payload read; a bigger file is treated as unreadable. */
+const MAX_EVENT_PAYLOAD_BYTES = 1024 * 1024;
+
+/**
+ * The pushed head of a GitHub Actions pull-request run, or `null` when it
+ * cannot be established as a SAME-REPOSITORY pull request.
+ *
+ * On `pull_request` / `pull_request_target`, `GITHUB_SHA` is the ephemeral
+ * merge commit (the base tip on `_target`) and `GITHUB_REF_NAME` is
+ * `<n>/merge` — neither is anything a person pushed. The real head sha only
+ * lives in the event payload at `GITHUB_EVENT_PATH`, which is read here once
+ * so that branch and sha are decided from the same read and cannot disagree.
+ *
+ * A fork PR yields `null`: `GITHUB_HEAD_REF` is then the FORK's branch name
+ * (`main` on a `contrib:main` PR would be filed under the base repo's own
+ * `main`), so the merge-ref behaviour is kept. Missing, unreadable,
+ * oversized or invalid payloads also yield `null`. Never throws, and shells
+ * out to nothing — `actions/checkout` puts the merge commit at HEAD, so
+ * `git rev-parse HEAD` would report the merge sha too.
+ */
+function pullRequestHead(
+  env: Record<string, string | undefined>,
+): { sha: string | null } | null {
+  try {
+    const eventName = firstEnv(env, ["GITHUB_EVENT_NAME"]);
+    if (eventName !== "pull_request" && eventName !== "pull_request_target") return null;
+    const eventPath = firstEnv(env, ["GITHUB_EVENT_PATH"]);
+    if (eventPath === null) return null;
+    if (fs.statSync(eventPath).size > MAX_EVENT_PAYLOAD_BYTES) return null;
+    const payload: unknown = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+    const pr = (payload as { pull_request?: Record<string, any> } | null)?.pull_request;
+    if (pr === null || typeof pr !== "object") return null;
+    const headRepo = pr.head?.repo?.full_name;
+    const baseRepo = pr.base?.repo?.full_name;
+    if (typeof headRepo !== "string" || headRepo === "" || headRepo !== baseRepo) return null;
+    const sha = pr.head?.sha;
+    return { sha: typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha) ? sha : null };
   } catch {
     return null;
   }
@@ -164,7 +207,15 @@ export interface RunnerHints {
 }
 
 /**
- * Resolve the fixed list of environment variables the client reads. The
+ * Resolve the fixed list of environment variables the client reads.
+ *
+ * On a GitHub `pull_request` / `pull_request_target` run from the SAME
+ * repository, `branch` is `GITHUB_HEAD_REF` (the source branch) and
+ * `commitSha` is the payload's `pull_request.head.sha` (the pushed commit),
+ * both decided from one read of `GITHUB_EVENT_PATH`, ahead of the merge
+ * commit `GITHUB_SHA` and `<n>/merge` `GITHUB_REF_NAME`. A fork PR, or an
+ * unreadable payload, keeps the merge-ref values. `SPECGUARD_COMMIT_SHA` and
+ * `SPECGUARD_BRANCH` always win. The
  * branch list is the Ruby client's `BRANCH_KEYS` plus `CI_COMMIT_BRANCH` —
  * a key the Ruby client does not read, kept so a GitLab run resolves its
  * branch even where only the branch name is set, and sitting directly
@@ -185,9 +236,17 @@ export function readRunnerEnv(
 ): RunnerEnv {
   const env = proc.env as Record<string, string | undefined>;
 
+  // Only consulted for a GitHub pull-request run, and only when an explicit
+  // SPECGUARD_COMMIT_SHA / SPECGUARD_BRANCH has not already settled the answer.
+  const explicitSha = firstEnv(env, ["SPECGUARD_COMMIT_SHA"]);
+  const explicitBranch = firstEnv(env, ["SPECGUARD_BRANCH"]);
+  const prHead =
+    explicitSha !== null && explicitBranch !== null ? null : pullRequestHead(env);
+
   const commitSha =
+    explicitSha ??
+    prHead?.sha ??
     firstEnv(env, [
-      "SPECGUARD_COMMIT_SHA",
       "GITHUB_SHA",
       "CI_COMMIT_SHA",
       "CIRCLE_SHA1",
@@ -196,8 +255,9 @@ export function readRunnerEnv(
     ]) ?? git(env, ["rev-parse", "HEAD"]);
 
   const branch =
+    explicitBranch ??
+    (prHead === null ? null : firstEnv(env, ["GITHUB_HEAD_REF"])) ??
     firstEnv(env, [
-      "SPECGUARD_BRANCH",
       "GITHUB_REF_NAME",
       "CI_COMMIT_REF_NAME",
       "CI_COMMIT_BRANCH",

@@ -733,8 +733,8 @@ them.
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `commit_sha` | string | **required**, non-empty. `SPECGUARD_COMMIT_SHA`, `GITHUB_SHA`, `CI_COMMIT_SHA`, `CIRCLE_SHA1`, `BUILDKITE_COMMIT`, `GIT_COMMIT`, else `git rev-parse HEAD` |
-| `branch` | string \| null | `SPECGUARD_BRANCH` if you set it, else `GITHUB_REF_NAME`, `CI_COMMIT_REF_NAME`, `CI_COMMIT_BRANCH`, `CIRCLE_BRANCH`, `BUILDKITE_BRANCH`, `GIT_BRANCH`, else `git branch --show-current` — null on a detached checkout |
+| `commit_sha` | string | **required**, non-empty. `SPECGUARD_COMMIT_SHA`, on a same-repository GitHub `pull_request` / `pull_request_target` run the pushed head commit from the event payload (`GITHUB_EVENT_PATH`) rather than the merge commit, `GITHUB_SHA`, `CI_COMMIT_SHA`, `CIRCLE_SHA1`, `BUILDKITE_COMMIT`, `GIT_COMMIT`, else `git rev-parse HEAD` |
+| `branch` | string \| null | `SPECGUARD_BRANCH` if you set it, else on a same-repository GitHub pull request `GITHUB_HEAD_REF` (the source branch, not `<n>/merge`; fork PRs keep `GITHUB_REF_NAME`), else `GITHUB_REF_NAME`, `CI_COMMIT_REF_NAME`, `CI_COMMIT_BRANCH`, `CIRCLE_BRANCH`, `BUILDKITE_BRANCH`, `GIT_BRANCH`, else `git branch --show-current` — null on a detached checkout |
 | `ci_run_id` | string \| null | **string, never a number** |
 | `shard_id` | string \| null | **string, never a number** |
 | `duration_seconds` | number \| null | non-negative |
@@ -780,7 +780,7 @@ Self-hosting needs no code change — point `SPECGUARD_ENDPOINT` at your own dep
 - **No failure messages and no stack traces.** A failing test contributes the string `failed` and nothing else.
 - **No console output.** Nothing your suite printed, and nothing any other reporter wrote, is read or forwarded.
 - **No environment.** A fixed list of variables is read and no others: the ones that fill `commit_sha`,
-  `branch`, `ci_run_id` and `shard_id`, plus six that configure the client itself — `SPECGUARD_ENDPOINT`,
+  `branch` (plus, on a GitHub pull request, the JSON event file `GITHUB_EVENT_PATH` names, read for its head sha and repository names only), `ci_run_id` and `shard_id`, plus six that configure the client itself — `SPECGUARD_ENDPOINT`,
   `SPECGUARD_OUTPUT_PATH`, `SPECGUARD_LOCAL_OUTPUT_PATH`, `SPECGUARD_TIMEOUT`, `SPECGUARD_REPOSITORY_ID`
   (the repository id in the ingest URL for an `sga_` agent key), and `SPECGUARD_API_KEY`,
   which leaves the machine only as the bearer token above.
