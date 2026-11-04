@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { exampleId, uniquifyIds } from "../src/core/id.js";
+import { exampleId, uniquifyIds, uniquifyRows } from "../src/core/id.js";
 import type { SpecRow } from "../src/core/types.js";
 
 function row(file: string, name: string, line: number, outcome = "passed"): SpecRow {
@@ -78,4 +78,75 @@ test("no collisions: the same rows come back and nothing is reported", () => {
   const { rows, disambiguated } = uniquifyIds(input);
   assert.deepEqual(rows, input);
   assert.equal(disambiguated.size, 0);
+});
+
+/** Run `fn` with `process.stderr.write` captured; always restore it. */
+function captureStderr<T>(fn: () => T): { result: T; writes: string[] } {
+  const writes: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: fn(), writes };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/** `count` rows sharing one file and name, so each file contributes `count` disambiguated rows. */
+const collidingFile = (file: string, count: number): SpecRow[] =>
+  Array.from({ length: count }, () => row(file, "dup", 1));
+
+const collidingFiles = (files: number, perFile: number): SpecRow[] =>
+  Array.from({ length: files }, (_, i) => collidingFile(`f${i + 1}.test.js`, perFile)).flat();
+
+test("uniquifyRows: one stderr line names every colliding file and totals the rows across them", () => {
+  const { result, writes } = captureStderr(() =>
+    uniquifyRows([...collidingFile("a.test.js", 2), ...collidingFile("b.test.js", 3)]),
+  );
+  assert.equal(result.length, 5);
+  assert.equal(new Set(result.map((r) => r.id)).size, 5);
+  assert.equal(writes.length, 1);
+  const line = writes[0] ?? "";
+  assert.match(line, /disambiguated 5 test\(s\)/);
+  assert.ok(line.includes("a.test.js (2), b.test.js (3)"), line);
+});
+
+test("uniquifyRows: names five colliding files and adds no summary at exactly the cap", () => {
+  const { writes } = captureStderr(() => uniquifyRows(collidingFiles(5, 2)));
+  assert.equal(writes.length, 1);
+  const line = writes[0] ?? "";
+  assert.match(line, /disambiguated 10 test\(s\)/);
+  assert.ok(
+    line.includes("f1.test.js (2), f2.test.js (2), f3.test.js (2), f4.test.js (2), f5.test.js (2)"),
+    line,
+  );
+  assert.ok(!line.includes("more file(s)"), line);
+});
+
+test("uniquifyRows: summarises the files past the cap and does not name them", () => {
+  const { writes } = captureStderr(() => uniquifyRows(collidingFiles(6, 2)));
+  assert.equal(writes.length, 1);
+  const line = writes[0] ?? "";
+  assert.match(line, /disambiguated 12 test\(s\)/);
+  assert.ok(line.includes("f5.test.js (2), and 1 more file(s)."), line);
+  assert.ok(!line.includes("f6.test.js"), line);
+});
+
+test("uniquifyRows: says nothing and ships the rows unchanged when nothing collides", () => {
+  const input = [row("a.test.js", "one", 1), row("a.test.js", "two", 2), row("b.test.js", "one", 1)];
+  const { result, writes } = captureStderr(() => uniquifyRows(input));
+  assert.deepEqual(writes, []);
+  assert.deepEqual(result, input);
+});
+
+test("uniquifyRows: ships the rows unchanged, silently, when disambiguation throws", () => {
+  const input = [row("a.test.js", "one", 1), null as never];
+  const { result, writes } = captureStderr(() => uniquifyRows(input));
+  assert.equal(result.length, 2);
+  assert.equal(result[0], input[0]);
+  assert.equal(result[1], input[1]);
+  assert.deepEqual(writes, []);
 });
