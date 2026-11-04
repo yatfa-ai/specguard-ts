@@ -621,6 +621,11 @@ This client composes it as a SHA-1 over the project-relative `file_path` and the
 stable across runs for an unchanged test, stable across shards, independent of execution order. Never an
 index into the run.
 
+Tests that share a file and a composed name (a loop around one `test("adds", …)`, an `it.each` with no
+placeholder in its title, a repeated title) would otherwise collide on one id, so every member of such a
+group is disambiguated by its position among them in definition order (and one `SpecGuard:` line on
+stderr names the files); tests whose id nobody else claims keep it unchanged, and `name` is never altered.
+
 ## If you shard your suite
 
 Each process loads the reporter and POSTs its own slice; `ci_run_id` is what tells SpecGuard those POSTs

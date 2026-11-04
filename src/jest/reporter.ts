@@ -1,6 +1,7 @@
 import { JestCollector } from "./collector.js";
 import { annotateRows } from "../node-test/annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
+import { uniquifyRows } from "../core/id.js";
 import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
 import { deliver, type TransportDeps } from "../core/transport.js";
 import type { ValidatorDeps } from "../core/validator.js";
@@ -135,7 +136,7 @@ export class SpecguardJestReporter {
       }
 
       // A run that reported zero tests has nothing to say — no POST, no file.
-      const rows = collector.getRows();
+      const rows = uniquifyRows(collector.getRows());
       if (rows.length === 0) return;
 
       // The annotation pass is shared with the node:test and Vitest
