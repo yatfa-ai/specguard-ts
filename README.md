@@ -495,7 +495,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     reporters: ["default", "@yatfa/specguard/vitest"],
-    includeTaskLocation: true, // without this, Vitest reports no line numbers
   },
 });
 ```
@@ -504,10 +503,14 @@ Environment variables, the wire contract, sharding, and the never-fail guarantee
 `node:test` reporter's — one team running both runners configures them identically, and rows from the two
 runners land in the same envelope shape with the same stable-id composition.
 
-**`includeTaskLocation: true` is required.** The wire contract needs each row's `line_number`, and Vitest
-populates test locations only when this option is set — a measured fact pinned by test, not a documented
-one assumed. Without it every row is dropped with **one** stderr line naming the setting, nothing POSTs,
-and the run's own results and exit code are untouched. (The dropped rows are counted, not silently lost.)
+**`includeTaskLocation` is enabled for you.** The wire contract needs each row's `line_number`, and Vitest
+populates test locations only when `test.includeTaskLocation` is on (its default is off). The reporter sets it
+in its `onInit` hook, so adding the reporter alone ships telemetry; setting the option by hand is harmless.
+Only if the flip is impossible (a frozen or unusual Vitest config) does every row get dropped with **one**
+stderr line naming the setting — nothing POSTs, and the run's own results and exit code are untouched. (The
+dropped rows are counted, not silently lost.) An explicit `includeTaskLocation: false` is overridden, since
+it cannot be told apart from the default. Jest is different: its reporter cannot change the config, so the
+Jest requirement below still stands.
 
 **Vitest ≥ 4, specifically.** Vitest 4 replaced the reporter API this adapter reads (`onTestRunEnd`; on
 Vitest ≤ 3 that hook does not exist and the old `onFinished` hook fires instead). On an older Vitest the

@@ -333,3 +333,49 @@ test("no vitest.config.shard, a malformed one, or no onInit at all leaves shard_
   }
   assert.equal(await vitestShardIdFor(null, undefined, false), null);
 });
+
+test("onInit turns includeTaskLocation on for a plain config, and leaves an already-truthy one alone", () => {
+  for (const initial of [undefined, false, 0, null]) {
+    const config: { includeTaskLocation?: unknown } = initial === undefined ? {} : { includeTaskLocation: initial };
+    new SpecguardVitestReporter({ repoRoot: pkgRoot }).onInit({ config });
+    assert.equal(config.includeTaskLocation, true, String(initial));
+  }
+  const already = { includeTaskLocation: true };
+  new SpecguardVitestReporter({ repoRoot: pkgRoot }).onInit({ config: already });
+  assert.equal(already.includeTaskLocation, true);
+});
+
+test("onInit never throws on a frozen or odd config, and the dropped-rows warning remains the fallback", async () => {
+  const frozen = Object.freeze({ shard: Object.freeze({ index: 2, count: 4 }) });
+  const oddInstances: unknown[] = [
+    { config: frozen },
+    { config: Object.seal({}) },
+    { config: new Proxy({}, { set() { throw new Error("no"); } }) },
+    { config: "nope" },
+    { config: null },
+    {},
+    null,
+    undefined,
+  ];
+  for (const instance of oddInstances) {
+    assert.doesNotThrow(() => new SpecguardVitestReporter({ repoRoot: pkgRoot }).onInit(instance));
+  }
+  assert.equal((frozen as { includeTaskLocation?: unknown }).includeTaskLocation, undefined);
+
+  // A frozen config still lets the shard through, and a run whose tests then
+  // carry no location still warns (nothing was flipped, so nothing changed).
+  const reporter = new SpecguardVitestReporter({ repoRoot: pkgRoot, env: env() });
+  reporter.onInit({ config: frozen });
+  const stderr: string[] = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: unknown) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await reporter.onTestRunEnd([moduleOf([{ ...vitestTest("no-loc", 1), location: null }])]);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.ok(stderr.some((l) => l.includes("dropped 1") && l.includes("includeTaskLocation")), stderr.join(""));
+});

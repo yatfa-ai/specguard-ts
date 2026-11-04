@@ -39,9 +39,14 @@ export interface VitestReporterOptions {
  *   export default defineConfig({
  *     test: {
  *       reporters: ["default", "@yatfa/specguard/vitest"],
- *       includeTaskLocation: true, // without this Vitest reports no lines
  *     },
  *   });
+ *
+ * The reporter turns `includeTaskLocation` on itself in `onInit` (Vitest
+ * reports no test lines without it, and the wire contract needs them), so
+ * adding the reporter alone ships telemetry; setting the option by hand is
+ * harmless. If the config cannot be flipped, rows are dropped with one
+ * stderr warning instead.
  *
  * Requires Vitest >= 4.0.0: Vitest 4 replaced the reporter API this adapter
  * reads (`onTestRunEnd`; on Vitest <= 3 that hook does not exist and the old
@@ -94,14 +99,36 @@ export class SpecguardVitestReporter {
    * carries `shard: { index, count }` only under `--shard=i/n`; the index
    * becomes the lowest-precedence `shard_id`. NEVER THROWS — an absent or
    * malformed shard leaves the env exactly as the constructor resolved it.
+   *
+   * It also enables `includeTaskLocation` on the resolved config: Vitest
+   * leaves it off by default, and without it every test's `location` is
+   * undefined so every row is dropped. This must happen here, not in the
+   * constructor — the Vitest instance only exists in `onInit`. An explicit
+   * `false` is indistinguishable from the default and is overridden; the
+   * reporter's data is useless without lines. A frozen or odd config shape
+   * falls through to the dropped-rows warning in `onTestRunEnd`.
    */
   onInit(vitest?: unknown): void {
     try {
-      const config = (vitest as { config?: { shard?: { index?: unknown } | null } } | null)
-        ?.config;
+      const config = (
+        vitest as { config?: { shard?: { index?: unknown } | null; includeTaskLocation?: unknown } } | null
+      )?.config;
       this.env = withNativeShard(this.env, config?.shard?.index);
     } catch {
       // Never let a surprising instance shape fail the suite.
+    }
+    try {
+      const config = (vitest as { config?: unknown } | null)?.config;
+      if (
+        config !== null &&
+        typeof config === "object" &&
+        !(config as { includeTaskLocation?: unknown }).includeTaskLocation
+      ) {
+        (config as { includeTaskLocation?: unknown }).includeTaskLocation = true;
+      }
+    } catch {
+      // A frozen/odd config (a strict-mode assignment throws): fall back to
+      // the dropped-rows warning. Never fail the suite.
     }
   }
 
@@ -133,7 +160,7 @@ export class SpecguardVitestReporter {
 
       if (collector.dropped > 0) {
         process.stderr.write(
-          `SpecGuard: dropped ${collector.dropped} test result(s) with no usable line or outcome — Vitest reports test locations only with \`includeTaskLocation: true\` in the Vitest config. The test run is unaffected.\n`,
+          `SpecGuard: dropped ${collector.dropped} test result(s) with no usable line or outcome — Vitest reports test locations only with \`includeTaskLocation: true\`, which the reporter could not enable on this Vitest config — set it in the Vitest config. The test run is unaffected.\n`,
         );
       }
 
