@@ -2,6 +2,7 @@ import { RunCollector } from "./collector.js";
 import type { TestEventData } from "./collector.js";
 import { annotateRows } from "./annotate.js";
 import { buildEnvelope } from "../core/envelope.js";
+import { uniquifyRows } from "../core/id.js";
 import {
   readRunnerEnv,
   shardIndexFromTestShardFlag,
@@ -107,7 +108,7 @@ async function finish(
   repoRoot: string,
 ): Promise<void> {
   try {
-    const rows = collector.getRows();
+    const rows = uniquifyRows(collector.getRows());
 
     if (collector.dropped > 0) {
       process.stderr.write(

@@ -680,3 +680,22 @@ test("end to end: no --test-shard flag, or a malformed one, posts shard_id null"
     }
   }
 });
+
+test("end to end: repeated titles in one file ship distinct ids, the failing repeat intact, with one stderr line", async () => {
+  const srv = await captureServer();
+  try {
+    const result = await runNodeTest("repeated-title.test.js", srv.url);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 4);
+    assert.equal(new Set(specs.map((s) => s.id)).size, 4);
+    const adds = specs.filter((s) => s.name === "calc > adds");
+    assert.deepEqual(adds.map((s) => s.outcome), ["passed", "failed", "passed"]);
+    assert.equal(
+      result.stderr.split("\n").filter((l) => l.includes("disambiguated 3 test(s)")).length,
+      1,
+      result.stderr,
+    );
+  } finally {
+    await srv.close();
+  }
+});
