@@ -194,3 +194,74 @@ test("durationSeconds is wall-clock seconds since the reporter's start", () => {
   assert.equal(collector.durationSeconds(2_500), 1.5);
   assert.equal(collector.durationSeconds(500), 0); // never negative
 });
+
+// --- A module that fails to run at all ----------------------------------
+
+function crashedModule(
+  errors: readonly unknown[] | (() => never),
+  moduleId = "/repo/fixtures/vitest/crash.test.ts",
+): VitestTestModule {
+  return {
+    type: "module",
+    moduleId,
+    children: { allTests: () => [][Symbol.iterator]() },
+    errors: typeof errors === "function" ? errors : () => errors,
+  };
+}
+
+test("a module with zero tests and module errors ships ONE failed row with the stable name", () => {
+  const collector = collect([crashedModule([new Error("boom at import")])]);
+  const rows = collector.getRows();
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.file_path, "fixtures/vitest/crash.test.ts");
+  assert.equal(row.line_number, 1);
+  assert.equal(row.outcome, "failed");
+  assert.equal(row.status, "unannotated");
+  assert.equal(row.duration, null);
+  assert.equal(row.name, "fixtures/vitest/crash.test.ts > (test file failed to run)");
+  assert.equal(collector.dropped, 0);
+});
+
+test("the Vitest crash row is byte-identical to the one node:test would ship for the same file", () => {
+  const collector = collect([crashedModule([new Error("x")], "/repo/test/crash.test.js")]);
+  assert.equal(collector.getRows()[0]!.name, "test/crash.test.js > (test file failed to run)");
+});
+
+test("a genuinely empty module (zero tests, no errors — e.g. all filtered out) ships nothing", () => {
+  const collector = collect([crashedModule([])]);
+  assert.equal(collector.getRows().length, 0);
+  assert.equal(collector.dropped, 0);
+});
+
+test("a module with tests never gains a file row, even when it also reports module errors", () => {
+  const mod = module([vitestTest({ name: "t", result: () => ({ state: "failed" }) })]);
+  mod.errors = () => [new Error("afterAll hook failed")];
+  const collector = collect([mod]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["t"]);
+});
+
+test("an all-skipped module (state skipped, tests present, no errors) is not a failure", () => {
+  const collector = collect([
+    module([vitestTest({ name: "s", result: () => ({ state: "skipped" }) })]),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.outcome), ["pending"]);
+});
+
+test("a module whose errors() throws is dropped and counted, never thrown", () => {
+  const collector = collect([
+    crashedModule(() => {
+      throw new Error("hostile");
+    }),
+  ]);
+  assert.equal(collector.getRows().length, 0);
+  assert.equal(collector.dropped, 1);
+});
+
+test("a crashed module with no usable module id is dropped and counted", () => {
+  const mod = crashedModule([new Error("x")]);
+  delete (mod as { moduleId?: string }).moduleId;
+  const collector = collect([mod]);
+  assert.equal(collector.getRows().length, 0);
+  assert.equal(collector.dropped, 1);
+});

@@ -1,6 +1,7 @@
 import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
+import { fileFailedRow } from "../core/file-failed.js";
 
 /**
  * The shape of `ev.data` on the `node:test` reporter events this collector
@@ -43,6 +44,8 @@ interface Frame {
 export class RunCollector {
   private readonly rows: SpecRow[] = [];
   private readonly stack: Frame[] = [];
+  /** Files that already shipped a failed row of their own. */
+  private readonly filesWithFailedRow = new Set<string>();
   private readonly startedAtMs: number;
   private readonly repoRoot: string;
   /** Rows dropped for a missing/invalid line or file — warned once at the end. */
@@ -78,10 +81,16 @@ export class RunCollector {
     const file = data.file;
     const line = data.line;
 
-    // A file that reports zero tests still emits one synthetic pass event
-    // FOR THE FILE ITSELF — name is the absolute path, line 1. It is not a
-    // test and must not ship as one.
-    if (data.name !== undefined && data.name === file) return;
+    // A test FILE is reported as an event of its own: a file with zero tests
+    // emits one synthetic pass (not a test — must not ship), and a file that
+    // failed to run at all (syntax error, throwing top-level statement,
+    // missing import) emits a fail. The event's name is the absolute path on
+    // Node 20 and a cwd-relative path on newer Node, so it is recognised
+    // against both spellings.
+    if (this.isFileLevelEvent(data.name, file)) {
+      if (kind === "fail") this.onFileFailed(data);
+      return;
+    }
 
     const composedName = [...this.stack.map((f) => f.name), top.name]
       .filter((segment) => segment !== "")
@@ -110,6 +119,7 @@ export class RunCollector {
     // shipped with outcome "pending", never silently counted as a pass.
     const outcome = kind === "fail" ? "failed" : data.skip === true ? "pending" : "passed";
 
+    if (outcome === "failed") this.filesWithFailedRow.add(filePath);
     this.rows.push({
       file_path: filePath,
       line_number: line,
@@ -120,6 +130,44 @@ export class RunCollector {
       id: exampleId(filePath, composedName),
       outcome,
     });
+  }
+
+  /**
+   * A file-level `test:fail`: the file crashed before (or instead of) running
+   * its tests. Ships ONE row with a stable machine-independent name — unless
+   * the file already produced a failed row of its own, in which case the
+   * file's failure is already represented and a second row would double-count.
+   */
+  private onFileFailed(data: TestEventData): void {
+    const file = data.file;
+    if (typeof file !== "string" || file === "") {
+      this.dropped += 1;
+      return;
+    }
+    const filePath = this.relativize(file);
+    if (this.filesWithFailedRow.has(filePath)) return;
+    const durationMs = data.details?.duration_ms;
+    const duration =
+      typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+        ? durationMs / 1000
+        : null;
+    this.filesWithFailedRow.add(filePath);
+    this.rows.push(fileFailedRow(filePath, duration));
+  }
+
+  /**
+   * True when the event is the runner's own event for the test FILE rather
+   * than for a test in it: the name is the file's path, spelled absolutely
+   * (Node 20) or relative to the working directory (newer Node).
+   */
+  private isFileLevelEvent(name: string | undefined, file: string | undefined): boolean {
+    if (name === undefined || typeof file !== "string" || file === "") return false;
+    if (name === file) return true;
+    for (const root of [process.cwd(), this.repoRoot]) {
+      const rel = relative(root, file);
+      if (name === rel || name === rel.split(sep).join("/")) return true;
+    }
+    return false;
   }
 
   getRows(): readonly SpecRow[] {

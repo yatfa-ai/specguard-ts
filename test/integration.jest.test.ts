@@ -628,3 +628,25 @@ test("end to end: no --shard flag posts shard_id null", async (t) => {
     await srv.close();
   }
 });
+
+test("end to end: a Jest file that crashes at load ships ONE failed row beside the surviving file's rows", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    const result = await runJest("crash.config.mjs", srv.url);
+    assert.equal(result.code, 1, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    const crashRows = specs.filter((s) => s.file_path === "fixtures/jest/crash.test.js");
+    assert.equal(crashRows.length, 1, JSON.stringify(specs.map((s) => s.name)));
+    assert.equal(crashRows[0]!.name, "fixtures/jest/crash.test.js > (test file failed to run)");
+    assert.equal(crashRows[0]!.line_number, 1);
+    assert.equal(crashRows[0]!.outcome, "failed");
+    // the surviving file is intact: 6 rows, its one failure reported once
+    const survivors = specs.filter((s) => s.file_path !== "fixtures/jest/crash.test.js");
+    assert.equal(survivors.length, 6, JSON.stringify(survivors.map((s) => s.name)));
+    assert.equal(survivors.filter((s) => s.outcome === "failed").length, 1);
+  } finally {
+    await srv.close();
+  }
+});

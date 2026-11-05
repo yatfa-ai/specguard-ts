@@ -155,8 +155,16 @@ Five things in the raw event stream would silently corrupt the payload, and the 
    silently counted as a pass.
 
 One more, discovered while testing: **a test file that contains zero tests emits one synthetic `test:pass`
-for the file itself** (its name is the absolute file path). It is filtered; a zero-test file ships nothing
-and crashes nothing.
+for the file itself** (its name is the file path — absolute on Node 20, relative to the working directory on
+newer Node). It is filtered; a zero-test file ships nothing and crashes nothing.
+
+**A test file that fails to run at all is not dropped.** A syntax error, a throwing top-level statement or a
+missing import fails the file before any test exists, so there are no test rows to ship — and silently
+shipping nothing would make the suite look smaller instead of broken. Every adapter (`node:test`, Vitest and
+Jest alike) ships that file as ONE failed row: line `1`, outcome `failed`, and the name
+`<repo-relative path> > (test file failed to run)`. The name is deliberately machine-independent, because
+identity on the platform is semantic over it. A file whose tests fail normally never gains this extra row;
+only a file that produced no failed row of its own does.
 
 ### How an annotation is attributed to a test
 

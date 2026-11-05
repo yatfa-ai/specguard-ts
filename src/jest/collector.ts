@@ -1,6 +1,7 @@
 import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
+import { fileFailedRow } from "../core/file-failed.js";
 
 /**
  * Structural types for the Jest 30 reporter API this collector reads —
@@ -62,6 +63,15 @@ export interface JestSuiteResult {
   /** Usually an absolute file path. */
   testFilePath?: string | undefined;
   testResults?: readonly JestAssertionResult[] | undefined;
+  /**
+   * Set (to an error-shaped object) when the suite failed to run at all — a
+   * syntax error, a throwing top-level statement, a missing require, or a
+   * file with no tests. Measured on Jest 30: such a suite has an empty
+   * `testResults`, a populated `testExecError`, and a `failureMessage`
+   * starting "Test suite failed to run".
+   */
+  testExecError?: unknown;
+  failureMessage?: string | null | undefined;
 }
 
 /** The structural subset of Jest's aggregated `AggregatedResult` this collector reads. */
@@ -107,14 +117,20 @@ export class JestCollector {
     for (const suite of suites) {
       let assertions: readonly unknown[] = [];
       let filePathRaw: unknown;
+      let crashed = false;
       try {
         const s = suite as JestSuiteResult | null | undefined;
         filePathRaw = s?.testFilePath;
+        const hasExecError = s?.testExecError !== undefined && s.testExecError !== null;
+        const noAssertions = !Array.isArray(s?.testResults) || s.testResults.length === 0;
+        const hasFailureMessage = typeof s?.failureMessage === "string" && s.failureMessage !== "";
+        crashed = hasExecError || (noAssertions && hasFailureMessage);
         const list = s?.testResults;
         assertions = Array.isArray(list) ? list : [];
       } catch {
         continue;
       }
+      const rowsBefore = this.rows.length;
       for (const assertion of assertions) {
         try {
           this.add(filePathRaw, assertion);
@@ -122,7 +138,24 @@ export class JestCollector {
           this.dropped += 1;
         }
       }
+      // A suite that failed to run has no assertions, so the loop above is
+      // silent about it. If the suite already shipped a failed row of its
+      // own the failure is represented; a second file row would double-count.
+      if (crashed && !this.rows.slice(rowsBefore).some((r) => r.outcome === "failed")) {
+        this.addFileFailure(filePathRaw);
+      }
     }
+  }
+
+  /** Ship the one failed row for a suite that failed to run. */
+  private addFileFailure(filePathRaw: unknown): void {
+    if (typeof filePathRaw !== "string" || filePathRaw === "") {
+      this.dropped += 1;
+      return;
+    }
+    // Jest reports no per-file duration for a suite that never ran
+    // (`perfStats` is all zeros), so none is fabricated.
+    this.rows.push(fileFailedRow(this.relativize(filePathRaw), null));
   }
 
   getRows(): readonly SpecRow[] {

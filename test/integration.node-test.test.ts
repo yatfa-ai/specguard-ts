@@ -699,3 +699,34 @@ test("end to end: repeated titles in one file ship distinct ids, the failing rep
     await srv.close();
   }
 });
+
+test("end to end: a test file that crashes at load ships ONE failed row and fails the run", async () => {
+  const srv = await captureServer();
+  try {
+    const result = await runNodeTest("crash.test.js", srv.url);
+    assert.equal(result.code, 1, `the crash is the suite's own failure: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 1, JSON.stringify(specs));
+    assert.equal(specs[0]!.name, "fixtures/crash.test.js > (test file failed to run)");
+    assert.equal(specs[0]!.file_path, "fixtures/crash.test.js");
+    assert.equal(specs[0]!.line_number, 1);
+    assert.equal(specs[0]!.outcome, "failed");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("end to end: a file whose tests fail normally gains no file row", async () => {
+  const srv = await captureServer();
+  try {
+    await runNodeTest("mixed.test.js", srv.url);
+    const specs = srv.captured[0]!.body.specs;
+    assert.ok(
+      !specs.some((s) => s.name.endsWith("(test file failed to run)")),
+      JSON.stringify(specs.map((s) => s.name)),
+    );
+  } finally {
+    await srv.close();
+  }
+});

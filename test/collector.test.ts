@@ -209,3 +209,106 @@ test("unannotated rows always carry status unannotated, intent null, and a name"
   assert.equal(row.intent, null);
   assert.ok(typeof row.name === "string" && row.name.length > 0);
 });
+
+// --- A test file that fails to run at all -------------------------------
+
+const CRASH_FILE = "/repo/test/crash.test.js";
+
+function fileEvent(
+  c: RunCollector,
+  name: string,
+  kind: "pass" | "fail",
+  extra: { file?: string; durationMs?: number } = {},
+): void {
+  c.onStart({ name, nesting: 0 });
+  c.onResult(
+    {
+      name,
+      nesting: 0,
+      file: extra.file ?? CRASH_FILE,
+      line: 1,
+      column: 1,
+      details: extra.durationMs === undefined ? {} : { duration_ms: extra.durationMs },
+    },
+    kind,
+  );
+}
+
+test("a file-level test:fail (absolute-path name, Node 20) ships ONE failed row with a stable relative name", () => {
+  const c = collector();
+  fileEvent(c, CRASH_FILE, "fail", { durationMs: 40 });
+  const rows = c.getRows();
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.file_path, "test/crash.test.js");
+  assert.equal(row.line_number, 1);
+  assert.equal(row.outcome, "failed");
+  assert.equal(row.status, "unannotated");
+  assert.equal(row.intent, null);
+  assert.equal(row.duration, 0.04);
+  // The name is pinned: platform identity is semantic over it, so a change
+  // re-identifies every crashed file in history.
+  assert.equal(row.name, "test/crash.test.js > (test file failed to run)");
+  assert.equal(row.id, exampleId("test/crash.test.js", row.name));
+  assert.equal(c.dropped, 0);
+});
+
+test("a file-level test:fail named with a cwd-relative path (newer Node) ships the SAME row as the absolute spelling", () => {
+  const absolute = collector();
+  fileEvent(absolute, CRASH_FILE, "fail");
+  const relativeSpelling = new RunCollector(process.cwd());
+  fileEvent(relativeSpelling, "test/crash.test.js", "fail", {
+    file: `${process.cwd()}/test/crash.test.js`,
+  });
+  assert.equal(relativeSpelling.getRows().length, 1);
+  assert.equal(relativeSpelling.getRows()[0]!.name, absolute.getRows()[0]!.name);
+});
+
+test("the crash row has no machine-specific path in its name or id", () => {
+  const a = new RunCollector("/home/alice/proj");
+  fileEvent(a, "/home/alice/proj/test/crash.test.js", "fail", { file: "/home/alice/proj/test/crash.test.js" });
+  const b = new RunCollector("/ci/work");
+  fileEvent(b, "/ci/work/test/crash.test.js", "fail", { file: "/ci/work/test/crash.test.js" });
+  assert.equal(a.getRows()[0]!.name, b.getRows()[0]!.name);
+  assert.equal(a.getRows()[0]!.id, b.getRows()[0]!.id);
+});
+
+test("a healthy zero-test file (synthetic file-level pass) still ships nothing, under both name spellings", () => {
+  const c = new RunCollector(process.cwd());
+  fileEvent(c, CRASH_FILE, "pass", { file: CRASH_FILE });
+  fileEvent(c, "test/empty.test.js", "pass", { file: `${process.cwd()}/test/empty.test.js` });
+  assert.equal(c.getRows().length, 0);
+  assert.equal(c.dropped, 0);
+});
+
+test("a file whose tests fail normally does not also gain a file row, even if the runner emits a file-level fail", () => {
+  const c = collector();
+  start(c, "a failing test", 0);
+  result(c, "a failing test", 0, 3, { kind: "fail" });
+  // A runner that ALSO fails the file after its failed child: already represented.
+  c.onStart({ name: FILE, nesting: 0 });
+  c.onResult({ name: FILE, nesting: 0, file: FILE, line: 1, details: {} }, "fail");
+  const rows = c.getRows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.name, "a failing test");
+});
+
+test("a crash row is emitted beside the surviving file's rows, and only once per file", () => {
+  const c = collector();
+  fileEvent(c, CRASH_FILE, "fail");
+  start(c, "survivor", 0);
+  result(c, "survivor", 0, 2);
+  fileEvent(c, CRASH_FILE, "fail");
+  assert.deepEqual(
+    c.getRows().map((r) => r.name),
+    ["test/crash.test.js > (test file failed to run)", "survivor"],
+  );
+});
+
+test("a file-level fail with no usable file is dropped and counted, never thrown", () => {
+  const c = collector();
+  c.onStart({ name: "x", nesting: 0 });
+  c.onResult({ name: "x", nesting: 0, line: 1, details: {} }, "fail");
+  assert.equal(c.getRows().length, 0);
+  assert.equal(c.dropped, 1);
+});
