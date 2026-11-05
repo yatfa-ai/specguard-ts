@@ -201,3 +201,71 @@ test("durationSeconds is wall-clock seconds since the reporter's start", () => {
   assert.equal(collector.durationSeconds(2_500), 1.5);
   assert.equal(collector.durationSeconds(500), 0); // never negative
 });
+
+// --- A suite that fails to run at all -----------------------------------
+
+const CRASH_SUITE = "/repo/fixtures/jest/crash.test.js";
+
+test("a suite with testExecError and no assertions ships ONE failed row with the stable name", () => {
+  const collector = collect([
+    { testFilePath: CRASH_SUITE, testResults: [], testExecError: new Error("boom at import") },
+  ]);
+  const rows = collector.getRows();
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.file_path, "fixtures/jest/crash.test.js");
+  assert.equal(row.line_number, 1);
+  assert.equal(row.outcome, "failed");
+  assert.equal(row.status, "unannotated");
+  assert.equal(row.duration, null);
+  assert.equal(row.name, "fixtures/jest/crash.test.js > (test file failed to run)");
+  assert.equal(collector.dropped, 0);
+});
+
+test("empty testResults plus a non-empty failureMessage (no testExecError) also ships the row", () => {
+  const collector = collect([
+    { testFilePath: CRASH_SUITE, testResults: [], failureMessage: "  ● Test suite failed to run" },
+  ]);
+  assert.equal(collector.getRows().length, 1);
+  assert.equal(collector.getRows()[0]!.outcome, "failed");
+});
+
+test("a healthy zero-test suite (no error, no failure message) ships nothing", () => {
+  const collector = collect([{ testFilePath: CRASH_SUITE, testResults: [] }]);
+  assert.equal(collector.getRows().length, 0);
+  assert.equal(collector.dropped, 0);
+});
+
+test("a suite whose tests fail normally (non-empty failureMessage) does not gain a file row", () => {
+  const collector = collect([
+    {
+      testFilePath: CRASH_SUITE,
+      testResults: [jestAssertion({ title: "bad", status: "failed" })],
+      failureMessage: "  ● bad",
+    },
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["bad"]);
+});
+
+test("a suite with an exec error AND a failed assertion of its own is not double-counted", () => {
+  const collector = collect([
+    {
+      testFilePath: CRASH_SUITE,
+      testResults: [jestAssertion({ title: "bad", status: "failed" })],
+      testExecError: new Error("x"),
+    },
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["bad"]);
+});
+
+test("an all-skipped suite is not a failure", () => {
+  const collector = collect([suite([jestAssertion({ title: "s", status: "pending" })])]);
+  assert.deepEqual(collector.getRows().map((r) => r.outcome), ["pending"]);
+});
+
+test("a crashed suite with no usable path is dropped and counted", () => {
+  const collector = new JestCollector("/repo", 1_000);
+  collector.onRunComplete({ testResults: [{ testResults: [], testExecError: new Error("x") }] });
+  assert.equal(collector.getRows().length, 0);
+  assert.equal(collector.dropped, 1);
+});

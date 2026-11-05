@@ -1,6 +1,7 @@
 import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
+import { fileFailedRow } from "../core/file-failed.js";
 
 /**
  * Structural types for the Vitest 4 reporter API this collector reads —
@@ -61,6 +62,13 @@ export interface VitestTestModule {
     /** Yields every test recursively, suites not included. */
     allTests?: (state?: unknown) => Iterable<VitestTestCase> | null | undefined;
   } | null | undefined;
+  /**
+   * Errors raised at the module level (an import that throws, a missing
+   * module, a throwing top-level statement or `describe` body). Measured on
+   * Vitest 4: a module that crashed has zero collected tests, state
+   * "failed", and a non-empty list here.
+   */
+  errors?: (() => readonly unknown[] | null | undefined) | null | undefined;
 }
 
 /**
@@ -103,6 +111,29 @@ export class VitestCollector {
           this.dropped += 1;
         }
       }
+      // A module that failed to run collects no tests at all, so the loop
+      // above is silent about it. The discriminator is zero collected tests
+      // PLUS module errors — never state alone, which is "failed" for any
+      // module with a failing test, and an all-skipped module is not a crash.
+      if (tests.length === 0) this.addFileFailure(mod);
+    }
+  }
+
+  /** Ship the one failed row for a module that crashed before collecting any test. */
+  private addFileFailure(mod: unknown): void {
+    try {
+      const errors = (mod as VitestTestModule | null | undefined)?.errors?.();
+      if (!Array.isArray(errors) || errors.length === 0) return;
+      const file = readModuleId(mod);
+      if (typeof file !== "string" || file === "") {
+        this.dropped += 1;
+        return;
+      }
+      // Module `diagnostic().duration` is test-execution time and is zero for
+      // a module that never ran a test, so there is no honest duration.
+      this.rows.push(fileFailedRow(this.relativize(file), null));
+    } catch {
+      this.dropped += 1;
     }
   }
 
