@@ -575,7 +575,7 @@ unchanged — the third adapter the core was built to admit. Configure it beside
 // jest.config.mjs
 export default {
   reporters: ["default", "@yatfa/specguard/jest"],
-  testLocationInResults: true, // without this, Jest reports no line numbers
+  testLocationInResults: true, // optional: exact line numbers (see below)
 };
 ```
 
@@ -583,11 +583,26 @@ Environment variables, the wire contract, sharding, and the never-fail guarantee
 `node:test` and Vitest reporters' — one team running all three runners configures them identically, and
 rows from every runner land in the same envelope shape with the same stable-id composition.
 
-**`testLocationInResults: true` is required.** The wire contract needs each row's `line_number`, and Jest
-populates each test's `location` only when this option is set — a measured fact pinned by test, not a
-documented one assumed. Without it every row is dropped with **one** stderr line naming the setting,
-nothing POSTs, and the run's own results and exit code are untouched. (The dropped rows are counted, not
-silently lost.)
+**`testLocationInResults: true` is recommended, not required.** The wire contract needs each row's
+`line_number`, and Jest populates each test's `location` only when this option is set. Without it the
+reporter does not drop your rows: it **derives each line from the test file's source** — the `it(` /
+`test(` / `it.only(` / `it.concurrent(` … call whose first string-literal argument equals the test's
+title — and prints **one** stderr line saying so and naming the setting. (The reporter cannot switch the
+option on itself: Jest 30 hands a reporter a frozen `globalConfig`, so it reads the option but never
+writes it.) Row ids hash only the file path and the composed name, so deriving a line never changes a
+test's identity or flakiness history. The limits of the derivation:
+
+- It is a source scan, not a parser. Repeated titles map to successive occurrences in the order Jest
+  reports them; a call on a `//` comment line is skipped.
+- A title that is not a plain string literal — a templated `it.each` title (`"adds %i"`), a computed
+  title, a concatenation — or a file that cannot be read gets **line `1`**, the same convention a
+  failed-file row uses, rather than being dropped. The notice counts how many rows fell back.
+- An `@intent` annotation is attributed by the exact call line, so a row whose line was derived
+  imprecisely (or fell back to `1`) may ship unannotated. Set `testLocationInResults: true` for exact
+  lines and exact attribution.
+
+Rows with a malformed `location`, no usable name, or an unrecognised status are still dropped, counted,
+and reported in one stderr line; the run's own results and exit code are untouched either way.
 
 **Jest ≥ 30, specifically.** The facts this adapter rests on were measured against a real Jest 30 child
 process, and the reporter's constructor reads Jest 30's three-argument shape

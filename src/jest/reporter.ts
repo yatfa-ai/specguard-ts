@@ -41,6 +41,20 @@ function jestShardIndex(globalConfig: unknown): unknown {
 }
 
 /**
+ * Whether the Jest config sets `testLocationInResults: true`, read from the
+ * (frozen — readable, never writable) `globalConfig`. `false` for anything
+ * else, including an absent or malformed config. Never throws.
+ */
+function jestLocationInResults(globalConfig: unknown): boolean {
+  try {
+    if (globalConfig === null || typeof globalConfig !== "object") return false;
+    return (globalConfig as { testLocationInResults?: unknown }).testLocationInResults === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The Jest reporter — the third adapter on the unchanged runner-agnostic
  * core: everything here is core calls plus the Jest-result mapping in
  * `JestCollector`.
@@ -50,8 +64,14 @@ function jestShardIndex(globalConfig: unknown): unknown {
  *   // jest.config.mjs
  *   export default {
  *     reporters: ["default", "@yatfa/specguard/jest"],
- *     testLocationInResults: true, // without this Jest reports no lines
+ *     testLocationInResults: true, // optional: exact lines (see below)
  *   };
+ *
+ * `testLocationInResults` is OPTIONAL. Without it Jest reports no test
+ * locations and the reporter — which cannot switch the option on, because
+ * Jest 30 hands it a frozen `globalConfig` — derives each row's line from
+ * the suite's source instead (see `source-lines.ts`), says so once on
+ * stderr, and ships the rows. With it the lines are Jest's own and exact.
  *
  * Jest constructs this class with THREE arguments —
  * `(globalConfig, options, docs)`, measured on Jest 30 — so the adapter's
@@ -71,6 +91,8 @@ export class SpecguardJestReporter {
   private readonly options: JestReporterOptions;
   private readonly env: RunnerEnv;
   private startedAtMs: number;
+  /** `globalConfig.testLocationInResults`, read up front: are Jest's lines exact? */
+  private readonly locationInResults: boolean;
 
   constructor(
     globalConfig?: unknown,
@@ -109,6 +131,7 @@ export class SpecguardJestReporter {
       };
     }
     this.env = env;
+    this.locationInResults = jestLocationInResults(globalConfig);
     this.startedAtMs = Date.now();
   }
 
@@ -129,9 +152,25 @@ export class SpecguardJestReporter {
       const collector = new JestCollector(repoRoot, this.startedAtMs);
       collector.onRunComplete(results);
 
+      const derived = collector.linesDerived + collector.linesFallback;
+      if (derived > 0) {
+        // One notice, decided by the option read up front: with the option
+        // off the lines are derived by design; with it on, Jest still left
+        // some rows without a location.
+        const fallback =
+          collector.linesFallback > 0
+            ? ` (${collector.linesFallback} could not be matched in the source and use line 1)`
+            : "";
+        process.stderr.write(
+          this.locationInResults
+            ? `SpecGuard: Jest reported no location for ${derived} test result(s) despite \`testLocationInResults\`; their line numbers were derived from the test source${fallback}. The test run is unaffected.\n`
+            : `SpecGuard: \`testLocationInResults\` is off, so line numbers for ${derived} test result(s) were derived from the test source${fallback}; set \`testLocationInResults: true\` in the Jest config for exact lines. The test run is unaffected.\n`,
+        );
+      }
+
       if (collector.dropped > 0) {
         process.stderr.write(
-          `SpecGuard: dropped ${collector.dropped} test result(s) with no usable line or outcome — Jest reports test locations only with \`testLocationInResults: true\` in the Jest config. The test run is unaffected.\n`,
+          `SpecGuard: dropped ${collector.dropped} test result(s) with no usable line, name or outcome. The test run is unaffected.\n`,
         );
       }
 
