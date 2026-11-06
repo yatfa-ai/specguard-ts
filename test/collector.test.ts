@@ -312,3 +312,103 @@ test("a file-level fail with no usable file is dropped and counted, never thrown
   assert.equal(c.getRows().length, 0);
   assert.equal(c.dropped, 1);
 });
+
+// --- A suite whose after()/before() hook fails ---------------------------
+
+const HOOK_ROW = "test/alpha.test.js > (test file failed to run)";
+
+function suiteResult(c: RunCollector, name: string, kind: "pass" | "fail", durationMs?: number, file: string = FILE): void {
+  c.onResult(
+    {
+      name,
+      nesting: 0,
+      file,
+      line: 1,
+      details: { type: "suite", ...(durationMs === undefined ? {} : { duration_ms: durationMs }) },
+    },
+    kind,
+  );
+}
+
+test("a failed suite whose children all passed (a throwing after() hook) ships ONE file row beside the children", () => {
+  const c = collector();
+  start(c, "teardown", 0);
+  start(c, "still passes", 1);
+  result(c, "still passes", 1, 5);
+  suiteResult(c, "teardown", "fail", 12);
+  const rows = c.getRows();
+  assert.deepEqual(rows.map((r) => [r.name, r.outcome]), [
+    ["teardown > still passes", "passed"],
+    [HOOK_ROW, "failed"],
+  ]);
+  assert.equal(rows[1]!.line_number, 1);
+  assert.equal(rows[1]!.duration, 0.012);
+  assert.equal(c.dropped, 0);
+});
+
+test("a failed suite whose child also failed ships no extra row (the child IS the file's failed row)", () => {
+  const c = collector();
+  start(c, "both", 0);
+  start(c, "fails itself", 1);
+  result(c, "fails itself", 1, 5, { kind: "fail" });
+  suiteResult(c, "both", "fail");
+  assert.deepEqual(c.getRows().map((r) => r.name), ["both > fails itself"]);
+});
+
+test("a hook failure followed by a LATER failing test in the same file still ends with one failed row", () => {
+  const c = collector();
+  start(c, "teardown", 0);
+  start(c, "still passes", 1);
+  result(c, "still passes", 1, 5);
+  suiteResult(c, "teardown", "fail");
+  start(c, "later", 0);
+  start(c, "fails itself", 1);
+  result(c, "fails itself", 1, 9, { kind: "fail" });
+  suiteResult(c, "later", "fail");
+  assert.deepEqual(c.getRows().filter((r) => r.outcome === "failed").map((r) => r.name), ["later > fails itself"]);
+});
+
+test("two failed suites in one file ship ONE row; failed suites in two files ship one each", () => {
+  const OTHER = "/repo/test/beta.test.js";
+  const c = collector();
+  start(c, "s1", 0);
+  suiteResult(c, "s1", "fail");
+  start(c, "s2", 0);
+  suiteResult(c, "s2", "fail");
+  start(c, "s3", 0);
+  suiteResult(c, "s3", "fail", undefined, OTHER);
+  assert.deepEqual(c.getRows().map((r) => r.name), [
+    HOOK_ROW,
+    "test/beta.test.js > (test file failed to run)",
+  ]);
+});
+
+test("the hook row is byte-identical to the crash row for the same file, and getRows() is idempotent", () => {
+  const hook = collector();
+  start(hook, "teardown", 0);
+  suiteResult(hook, "teardown", "fail");
+  const crash = collector();
+  fileEvent(crash, FILE, "fail", { file: FILE });
+  assert.equal(hook.getRows()[0]!.name, crash.getRows()[0]!.name);
+  assert.equal(hook.getRows()[0]!.id, crash.getRows()[0]!.id);
+  assert.equal(hook.getRows().length, 1);
+  assert.equal(hook.getRows().length, 1);
+});
+
+test("a hook failure then a file-level fail for the same file ships ONE row", () => {
+  const c = collector();
+  start(c, "teardown", 0);
+  suiteResult(c, "teardown", "fail");
+  fileEvent(c, FILE, "fail", { file: FILE });
+  assert.equal(c.getRows().length, 1);
+});
+
+test("a passed suite adds nothing, and a failed suite with no usable file is ignored without throwing", () => {
+  const c = collector();
+  start(c, "ok", 0);
+  suiteResult(c, "ok", "pass");
+  c.onStart({ name: "nofile", nesting: 0 });
+  c.onResult({ name: "nofile", nesting: 0, line: 1, details: { type: "suite" } }, "fail");
+  assert.equal(c.getRows().length, 0);
+  assert.equal(c.dropped, 0);
+});

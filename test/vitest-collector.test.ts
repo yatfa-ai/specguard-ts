@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { VitestCollector, type VitestTestCase, type VitestTestModule } from "../src/vitest/collector.js";
+import {
+  VitestCollector,
+  type VitestTestCase,
+  type VitestTestModule,
+  type VitestTestSuite,
+} from "../src/vitest/collector.js";
 
 /** A finished Vitest test case, shaped exactly as Vitest 4 hands it over. */
 function vitestTest(overrides: Partial<VitestTestCase> & { name: string }): VitestTestCase {
@@ -264,4 +269,142 @@ test("a crashed module with no usable module id is dropped and counted", () => {
   const collector = collect([mod]);
   assert.equal(collector.getRows().length, 0);
   assert.equal(collector.dropped, 1);
+});
+
+// --- Setup / teardown hook failures in a file that DID run ---------------
+
+const HOOK_FILE = "/repo/fixtures/vitest/hook.test.ts";
+const HOOK_ROW_NAME = "fixtures/vitest/hook.test.ts > (test file failed to run)";
+
+function suite(state: string, errors: readonly unknown[] | (() => never)): VitestTestSuite {
+  return { state: () => state, errors: typeof errors === "function" ? errors : () => errors };
+}
+
+/** A module that ran tests and reports `suites` / module `errors`. */
+function hookModule(
+  tests: VitestTestCase[],
+  opts: { suites?: VitestTestSuite[]; errors?: readonly unknown[] } = {},
+): VitestTestModule {
+  return {
+    type: "module",
+    moduleId: HOOK_FILE,
+    children: {
+      allTests: () => tests[Symbol.iterator](),
+      allSuites: () => (opts.suites ?? [])[Symbol.iterator](),
+    },
+    errors: () => opts.errors ?? [],
+  };
+}
+
+test("a throwing describe-level afterAll (passing test, failed suite with errors) ships ONE file row beside the test's own row", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "teardown > still passes" })], {
+      suites: [suite("failed", [new Error("afterAll boom")])],
+    }),
+  ]);
+  const rows = collector.getRows();
+  assert.deepEqual(rows.map((r) => [r.name, r.outcome]), [
+    ["teardown > still passes", "passed"],
+    [HOOK_ROW_NAME, "failed"],
+  ]);
+  assert.equal(rows[1]!.line_number, 1);
+  assert.equal(rows[1]!.duration, null);
+  assert.equal(collector.dropped, 0);
+});
+
+test("a throwing beforeAll keeps its tests pending and still turns the file red with one row", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "setup > never runs", result: () => ({ state: "skipped" }) })], {
+      suites: [suite("failed", [new Error("beforeAll boom")])],
+    }),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => [r.name, r.outcome]), [
+    ["setup > never runs", "pending"],
+    [HOOK_ROW_NAME, "failed"],
+  ]);
+});
+
+test("a throwing top-level afterAll (module errors, passing test) ships ONE file row", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "still passes" })], { errors: [new Error("top-level afterAll boom")] }),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => [r.name, r.outcome]), [
+    ["still passes", "passed"],
+    [HOOK_ROW_NAME, "failed"],
+  ]);
+});
+
+test("the hook row reuses the crash row's name byte for byte (the name is a wire contract)", () => {
+  const hook = collect([
+    hookModule([vitestTest({ name: "t" })], { errors: [new Error("x")] }),
+  ]).getRows()[1]!;
+  const crash = collect([crashedModule([new Error("x")], HOOK_FILE)]).getRows()[0]!;
+  assert.equal(hook.name, crash.name);
+  assert.equal(hook.id, crash.id);
+});
+
+test("a file with a failed row of its own gains no hook row, however many suites report errors", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "fails itself", result: () => ({ state: "failed" }) })], {
+      suites: [suite("failed", [new Error("a")]), suite("failed", [new Error("b")])],
+      errors: [new Error("c")],
+    }),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["fails itself"]);
+});
+
+test("two failing suites in a file with no failed row still ship ONE row, not one per suite", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "t" })], {
+      suites: [suite("failed", [new Error("a")]), suite("failed", [new Error("b")])],
+    }),
+  ]);
+  assert.equal(collector.getRows().filter((r) => r.name === HOOK_ROW_NAME).length, 1);
+});
+
+test("a suite that is failed only because a child failed (empty errors) adds nothing", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "t" })], { suites: [suite("failed", [])] }),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["t"]);
+});
+
+test("a passed suite with stray errors, and a healthy module, add nothing", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "t" })], { suites: [suite("passed", [new Error("x")])] }),
+    module([vitestTest({ name: "plain" })]),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["t", "plain"]);
+});
+
+test("older Vitest without allSuites / suite.errors is read as 'nothing reported', never a throw", () => {
+  const noAllSuites = hookModule([vitestTest({ name: "a" })]);
+  delete (noAllSuites.children as { allSuites?: unknown }).allSuites;
+  const noSuiteErrors = hookModule([vitestTest({ name: "b" })], { suites: [{ state: () => "failed" }] });
+  const collector = collect([noAllSuites, noSuiteErrors]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["a", "b"]);
+  assert.equal(collector.dropped, 0);
+});
+
+test("a suite whose errors() throws is dropped and counted, never thrown", () => {
+  const collector = collect([
+    hookModule([vitestTest({ name: "t" })], {
+      suites: [
+        suite("failed", () => {
+          throw new Error("hostile");
+        }),
+      ],
+    }),
+  ]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["t"]);
+  assert.equal(collector.dropped, 1);
+});
+
+test("a hook failure in a module with no usable module id is dropped and counted", () => {
+  const mod = hookModule([vitestTest({ name: "t" })], { errors: [new Error("x")] });
+  delete (mod as { moduleId?: string }).moduleId;
+  const collector = new VitestCollector("/repo", 1_000);
+  collector.onTestRunEnd([mod]);
+  assert.equal(collector.getRows().length, 0); // the test row needs the id too
+  assert.ok(collector.dropped >= 1);
 });

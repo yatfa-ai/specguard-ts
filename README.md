@@ -166,6 +166,15 @@ Jest alike) ships that file as ONE failed row: line `1`, outcome `failed`, and t
 identity on the platform is semantic over it. A file whose tests fail normally never gains this extra row;
 only a file that produced no failed row of its own does.
 
+**A file-level or suite-level setup/teardown hook that throws is not dropped either.** A throwing Vitest
+`beforeAll` / `afterAll` (module-level or inside a `describe`) or a `node:test` `describe` whose `after()`
+hook throws fails the run while the file's tests keep their own outcomes (`passed` for a teardown failure,
+`pending` for a Vitest `beforeAll`, whose tests are reported skipped). Such a file ships the same ONE failed
+row as a crashed file — same line, outcome and name — beside its tests' unchanged rows, and again only when
+the file has no failed row of its own. On some Node lines (observed on Node 22) a `describe`-level `after()` failure does not fail the `node` process
+at all, so the file row is then the only red signal. Jest already reports these as failed tests. Vitest's separate
+"unhandled errors" list is not read.
+
 ### How an annotation is attributed to a test
 
 Before the POST, the annotation pass resolves each `@intent:` annotation to the test it belongs to. The

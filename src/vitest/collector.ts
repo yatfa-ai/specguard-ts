@@ -53,6 +53,19 @@ export interface VitestTestCase {
   diagnostic?: (() => VitestTestDiagnostic | null | undefined) | null | undefined;
 }
 
+/**
+ * The structural subset of Vitest 4's `TestSuite` this collector reads.
+ * Measured on Vitest 4.1: a `describe` whose `beforeAll` / `afterAll` throws
+ * has `state() === "failed"` and the hook's error in `errors()`, while its
+ * own tests report passed (afterAll) or skipped (beforeAll). A suite that is
+ * "failed" merely because a child test failed has an EMPTY `errors()`, which
+ * is why the error list — never the state alone — is the discriminator.
+ */
+export interface VitestTestSuite {
+  state?: (() => string | null | undefined) | null | undefined;
+  errors?: (() => readonly unknown[] | null | undefined) | null | undefined;
+}
+
 /** The structural subset of Vitest 4's `TestModule` this collector reads. */
 export interface VitestTestModule {
   type?: string | undefined;
@@ -61,6 +74,8 @@ export interface VitestTestModule {
   children?: {
     /** Yields every test recursively, suites not included. */
     allTests?: (state?: unknown) => Iterable<VitestTestCase> | null | undefined;
+    /** Yields every suite (`describe`) recursively, tests not included. */
+    allSuites?: () => Iterable<VitestTestSuite> | null | undefined;
   } | null | undefined;
   /**
    * Errors raised at the module level (an import that throws, a missing
@@ -104,6 +119,7 @@ export class VitestCollector {
       } catch {
         continue; // a surprising module never fails the run
       }
+      const rowsBefore = this.rows.length;
       for (const test of tests) {
         try {
           this.add(mod, test);
@@ -111,19 +127,29 @@ export class VitestCollector {
           this.dropped += 1;
         }
       }
-      // A module that failed to run collects no tests at all, so the loop
-      // above is silent about it. The discriminator is zero collected tests
-      // PLUS module errors — never state alone, which is "failed" for any
-      // module with a failing test, and an all-skipped module is not a crash.
-      if (tests.length === 0) this.addFileFailure(mod);
+      // A file whose run reported a setup/teardown failure — a throwing
+      // module-level hook or a throwing `describe`-level `beforeAll` /
+      // `afterAll` — fails the run in Vitest while its tests keep their own
+      // outcomes (passed for an `afterAll`, skipped for a `beforeAll`), so
+      // the loop above is silent about it. Ship ONE file row, and only when
+      // the file has no failed row of its own (a failing test already turns
+      // the run red; a second row would double-count the file).
+      // A module that failed to run at all collects no tests, so it takes
+      // the same path: the discriminator is a reported error, never state
+      // alone, which is "failed" for any module with a failing test, and an
+      // all-skipped module is not a crash.
+      const ownFailedRow = this.rows.slice(rowsBefore).some((r) => r.outcome === "failed");
+      if (!ownFailedRow) this.addFileFailure(mod);
     }
   }
 
-  /** Ship the one failed row for a module that crashed before collecting any test. */
+  /**
+   * Ship the one failed row for a module that reported a file- or
+   * suite-level error and has no failed row of its own.
+   */
   private addFileFailure(mod: unknown): void {
     try {
-      const errors = (mod as VitestTestModule | null | undefined)?.errors?.();
-      if (!Array.isArray(errors) || errors.length === 0) return;
+      if (!hasReportedErrors(mod)) return;
       const file = readModuleId(mod);
       if (typeof file !== "string" || file === "") {
         this.dropped += 1;
@@ -237,4 +263,23 @@ function readModuleId(mod: unknown): unknown {
 function readModuleChildren(mod: unknown): VitestTestModule["children"] {
   if (mod === null || typeof mod !== "object") return undefined;
   return (mod as VitestTestModule).children;
+}
+
+/**
+ * True when the module itself reported errors, or any suite in it did.
+ * Every read is guarded: `allSuites` / `suite.errors` are absent on older
+ * Vitest minors, and a missing member means "nothing reported", not a throw.
+ * A throwing `errors()` propagates to the caller's never-throw envelope.
+ */
+function hasReportedErrors(mod: unknown): boolean {
+  const moduleErrors = (mod as VitestTestModule | null | undefined)?.errors?.();
+  if (Array.isArray(moduleErrors) && moduleErrors.length > 0) return true;
+  const suites = readModuleChildren(mod)?.allSuites?.();
+  if (suites === null || suites === undefined) return false;
+  for (const suite of suites) {
+    if (suite?.state?.() !== "failed") continue;
+    const errors = suite.errors?.();
+    if (Array.isArray(errors) && errors.length > 0) return true;
+  }
+  return false;
 }

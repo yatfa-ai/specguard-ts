@@ -46,6 +46,14 @@ export class RunCollector {
   private readonly stack: Frame[] = [];
   /** Files that already shipped a failed row of their own. */
   private readonly filesWithFailedRow = new Set<string>();
+  /**
+   * Files with a failed SUITE that had no failed row at the time it closed,
+   * mapped to that suite's duration (ms). Resolved lazily by `getRows()`:
+   * a later test in the same file may still fail on its own, and the file
+   * then already has its failed row, so deciding at suite-close would
+   * double-count it.
+   */
+  private readonly pendingSuiteFailures = new Map<string, number | undefined>();
   private readonly startedAtMs: number;
   private readonly repoRoot: string;
   /** Rows dropped for a missing/invalid line or file — warned once at the end. */
@@ -63,8 +71,12 @@ export class RunCollector {
   /**
    * Handle a `test:pass` or `test:fail` event. `describe` blocks emit their
    * own pass/fail events (`details.type === "suite"`); they are popped from
-   * the stack but never produce a row — otherwise a failing child is
-   * reported twice, once as itself and once through its parent suite.
+   * the stack but never produce a row of their own — otherwise a failing
+   * child is reported twice, once as itself and once through its parent
+   * suite. A FAILED suite none of whose descendants failed (a throwing
+   * `after()` / `before()` hook) is the one exception: it is remembered
+   * and, if its file still has no failed row at the end, ships as the
+   * file's ONE failed row (see `getRows`).
    */
   onResult(data: TestEventData, kind: "pass" | "fail"): void {
     const top = this.stack.pop();
@@ -73,6 +85,7 @@ export class RunCollector {
       // A suite result closes the suite frame. Suites at the top of the
       // stack pop cleanly (LIFO); tolerate a mismatched pop so a surprising
       // stream can never throw.
+      if (kind === "fail") this.onSuiteFailed(data);
       return;
     }
 
@@ -156,6 +169,20 @@ export class RunCollector {
   }
 
   /**
+   * A failed `describe`. Its failing children, if any, closed (and shipped
+   * their rows) before it did, so a suite failure that finds a failed row for
+   * its file is already represented. Otherwise it is a hook failure; park it
+   * until `getRows()` can tell whether a later test in the file failed.
+   */
+  private onSuiteFailed(data: TestEventData): void {
+    const file = data.file;
+    if (typeof file !== "string" || file === "") return; // not attributable to a file; the run is still red in node's own output
+    const filePath = this.relativize(file);
+    if (this.filesWithFailedRow.has(filePath) || this.pendingSuiteFailures.has(filePath)) return;
+    this.pendingSuiteFailures.set(filePath, data.details?.duration_ms);
+  }
+
+  /**
    * True when the event is the runner's own event for the test FILE rather
    * than for a test in it: the name is the file's path, spelled absolutely
    * (Node 20) or relative to the working directory (newer Node).
@@ -171,7 +198,22 @@ export class RunCollector {
   }
 
   getRows(): readonly SpecRow[] {
+    this.resolveSuiteFailures();
     return this.rows;
+  }
+
+  /** Ship one file row per parked suite failure whose file still has no failed row. Idempotent. */
+  private resolveSuiteFailures(): void {
+    for (const [filePath, durationMs] of this.pendingSuiteFailures) {
+      if (this.filesWithFailedRow.has(filePath)) continue;
+      const duration =
+        typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+          ? durationMs / 1000
+          : null;
+      this.filesWithFailedRow.add(filePath);
+      this.rows.push(fileFailedRow(filePath, duration));
+    }
+    this.pendingSuiteFailures.clear();
   }
 
   durationSeconds(nowMs: number = Date.now()): number {
