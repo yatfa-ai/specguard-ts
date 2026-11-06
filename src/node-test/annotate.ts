@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
+import { repoRelativePosix } from "../core/repo-path.js";
 import type { SpecRow } from "../core/types.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { LintBackendError, checkWithBackend, type ValidatorFinding } from "../lint/backend.js";
@@ -100,9 +101,7 @@ export function normalizeRepoPath(file: string, repoRoot: string): string {
     // the guard: `./` alone must not collapse to "").
     return posix.startsWith("./") && posix.length > "./".length ? posix.slice("./".length) : posix;
   }
-  const rel = relative(repoRoot, file);
-  if (rel.startsWith("..") || isAbsolute(rel)) return file;
-  return rel.split(sep).join("/");
+  return repoRelativePosix(file, repoRoot);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { relative, isAbsolute, sep } from "node:path";
+import { repoRelativePosix } from "../core/repo-path.js";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
@@ -311,12 +311,7 @@ export class VitestCollector {
   }
 
   private relativize(file: string): string {
-    if (!isAbsolute(file)) return file.split(sep).join("/");
-    const rel = relative(this.repoRoot, file);
-    // A file outside the repo root keeps its absolute path rather than a
-    // nonsense ../ escape.
-    if (rel.startsWith("..") || isAbsolute(rel)) return file;
-    return rel.split(sep).join("/");
+    return repoRelativePosix(file, this.repoRoot);
   }
 }
 
