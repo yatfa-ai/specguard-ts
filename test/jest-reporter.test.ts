@@ -133,10 +133,53 @@ test("a run that reported zero tests POSTs nothing and writes nothing", async ()
   assert.equal(sink.length, 0);
 });
 
-test("dropped rows (no location) warn on stderr naming testLocationInResults", async () => {
-  const { stderr, seen } = await runReporter(resultsOf([{ ...jestAssertion("no-loc", 1), location: null }]));
+test("rows with no location ship with source-derived lines and ONE notice naming testLocationInResults", async () => {
+  const { stderr, seen } = await runReporter(
+    resultsOf([
+      { ...jestAssertion("child ok", 1), location: null },
+      { ...jestAssertion("child failing", 1), location: null, status: "failed" },
+      { ...jestAssertion("not in the source", 1), location: null },
+    ]),
+    {},
+    { testLocationInResults: false },
+  );
+  assert.equal(seen.length, 1, "rows ship although Jest reported no location");
+  const lines = Object.fromEntries(seen[0]!.body.specs.map((s) => [s.name, s.line_number]));
+  const source = fs.readFileSync(join(pkgRoot, "fixtures", "jest", "mixed.test.js"), "utf8").split("\n");
+  assert.equal(lines["child ok"], source.findIndex((l) => l.startsWith('  it("child ok"')) + 1);
+  assert.equal(lines["child failing"], source.findIndex((l) => l.startsWith('  it("child failing"')) + 1);
+  assert.equal(lines["not in the source"], 1);
+  const notices = stderr.filter((l) => l.includes("derived from the test source"));
+  assert.equal(notices.length, 1, stderr.join(""));
+  assert.ok(notices[0]!.includes("`testLocationInResults` is off"), notices[0]);
+  assert.ok(notices[0]!.includes("1 could not be matched"), notices[0]);
+  assert.ok(!stderr.some((l) => l.includes("dropped")), stderr.join(""));
+});
+
+test("with testLocationInResults on and every location present there is no derivation notice", async () => {
+  const { stderr, seen } = await runReporter(
+    resultsOf([jestAssertion("child ok", 6)]),
+    {},
+    { testLocationInResults: true },
+  );
+  assert.equal(seen[0]!.body.specs[0]!.line_number, 6);
+  assert.ok(!stderr.some((l) => l.includes("derived from the test source")), stderr.join(""));
+});
+
+test("a location missing despite testLocationInResults gets the notice worded for that case", async () => {
+  const { stderr } = await runReporter(
+    resultsOf([{ ...jestAssertion("child ok", 1), location: null }]),
+    {},
+    { testLocationInResults: true },
+  );
+  const notice = stderr.find((l) => l.includes("derived from the test source"));
+  assert.ok(notice?.includes("despite `testLocationInResults`"), stderr.join(""));
+});
+
+test("a row with an unusable name is still dropped with the dropped warning", async () => {
+  const { stderr, seen } = await runReporter(resultsOf([{ ...jestAssertion("x", 1), title: "" }]));
   assert.equal(seen.length, 0); // every row dropped -> zero rows -> no POST
-  assert.ok(stderr.some((line) => line.includes("dropped 1") && line.includes("testLocationInResults")), stderr.join(""));
+  assert.ok(stderr.some((line) => line.includes("dropped 1")), stderr.join(""));
 });
 
 test("no commit sha: one stderr line, no POST, no crash", async () => {

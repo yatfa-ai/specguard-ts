@@ -1,8 +1,10 @@
-import { relative, isAbsolute, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { relative, isAbsolute, resolve, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
 import { msToSeconds } from "../core/duration.js";
+import { SourceLineIndex } from "./source-lines.js";
 
 /**
  * Structural types for the Jest 30 reporter API this collector reads —
@@ -24,7 +26,9 @@ import { msToSeconds } from "../core/duration.js";
  *   - `location.line` is 1-based and points at the `it(` CALL line — the
  *     same anchor `node:test` and Vitest report — but ONLY when the Jest
  *     config sets `testLocationInResults: true`; without it `location`
- *     is null and every row must drop.
+ *     is null, and the reporter cannot turn the option on (Jest 30 hands
+ *     it a frozen `globalConfig`), so the line is DERIVED from the suite's
+ *     source (see `source-lines.ts`) instead of dropping the row.
  *   - Per-test `duration` is MILLISECONDS and EXISTS (Jest's ancestors
  *     reported durations only at suite level); skip-family tests carry
  *     `duration: null`.
@@ -97,12 +101,23 @@ export class JestCollector {
   private readonly rows: SpecRow[] = [];
   private readonly startedAtMs: number;
   private readonly repoRoot: string;
-  /** Rows dropped for a missing/invalid line, name, or outcome — warned once at the end. */
+  private readonly readSource: (path: string) => string;
+  /** Rows dropped for an invalid line, name, or outcome — warned once at the end. */
   dropped = 0;
+  /** Rows with no Jest `location` whose line was found in the suite's source. */
+  linesDerived = 0;
+  /** Rows with no Jest `location` whose line could not be found: shipped at line 1. */
+  linesFallback = 0;
 
-  constructor(repoRoot: string, startedAtMs: number = Date.now()) {
+  /** `readSource` is a test seam for the source read; it may throw. */
+  constructor(
+    repoRoot: string,
+    startedAtMs: number = Date.now(),
+    readSource: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  ) {
     this.repoRoot = repoRoot;
     this.startedAtMs = startedAtMs;
+    this.readSource = readSource;
   }
 
   /** Consume one `onRunComplete` aggregated result. Never throws. */
@@ -132,9 +147,16 @@ export class JestCollector {
         continue;
       }
       const rowsBefore = this.rows.length;
+      // The suite's source is read at most once, and only if some assertion
+      // lacks a Jest location.
+      let index: SourceLineIndex | undefined;
+      const lineIndex = (): SourceLineIndex => {
+        index ??= this.buildIndex(filePathRaw);
+        return index;
+      };
       for (const assertion of assertions) {
         try {
-          this.add(filePathRaw, assertion);
+          this.add(filePathRaw, assertion, lineIndex);
         } catch {
           this.dropped += 1;
         }
@@ -167,22 +189,22 @@ export class JestCollector {
     return Math.max(0, (nowMs - this.startedAtMs) / 1000);
   }
 
-  private add(filePathRaw: unknown, assertion: unknown): void {
+  /** Index the suite's source for line derivation. Never throws; an unreadable file indexes nothing. */
+  private buildIndex(filePathRaw: unknown): SourceLineIndex {
+    try {
+      if (typeof filePathRaw !== "string" || filePathRaw === "") return new SourceLineIndex(null);
+      const path = isAbsolute(filePathRaw) ? filePathRaw : resolve(this.repoRoot, filePathRaw);
+      return new SourceLineIndex(this.readSource(path));
+    } catch {
+      return new SourceLineIndex(null);
+    }
+  }
+
+  private add(filePathRaw: unknown, assertion: unknown, lineIndex: () => SourceLineIndex): void {
     const file = typeof filePathRaw === "string" ? filePathRaw : undefined;
     const test = assertion as JestAssertionResult | null | undefined;
 
-    // line_number must be a positive integer or the whole payload is refused
-    // per-spec; dropping the row (and saying so) beats a rejected payload.
-    // On Jest the overwhelmingly common cause is a config without
-    // `testLocationInResults: true`, so the reporter's warning names it.
-    const line = test?.location?.line;
-    if (
-      typeof file !== "string" ||
-      file === "" ||
-      typeof line !== "number" ||
-      !Number.isInteger(line) ||
-      line <= 0
-    ) {
+    if (typeof file !== "string" || file === "") {
       this.dropped += 1;
       return;
     }
@@ -215,6 +237,32 @@ export class JestCollector {
         this.dropped += 1;
         return;
       }
+    }
+
+    // line_number must be a positive integer or the whole payload is refused
+    // per-spec. A `location` Jest did not report at all (null/undefined —
+    // `testLocationInResults` is off) is recovered from the suite's source,
+    // falling back to line 1 (the `fileFailedRow` convention) when the call
+    // cannot be found. A location Jest DID report but that is not a positive
+    // integer is malformed, not absent: that row is dropped and counted.
+    const location = test?.location;
+    let line: number;
+    if (location === null || location === undefined) {
+      const derived = lineIndex().take(title);
+      if (derived === null) {
+        line = 1;
+        this.linesFallback += 1;
+      } else {
+        line = derived;
+        this.linesDerived += 1;
+      }
+    } else {
+      const reported = location.line;
+      if (typeof reported !== "number" || !Number.isInteger(reported) || reported <= 0) {
+        this.dropped += 1;
+        return;
+      }
+      line = reported;
     }
 
     const durationMs = test?.duration;

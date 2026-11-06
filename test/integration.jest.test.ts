@@ -308,15 +308,44 @@ test("MEASURED: the @intent comment sits exactly one line above location.line �
   }
 });
 
-test("MEASURED: without testLocationInResults every row is dropped with a warning and nothing POSTs", async (t) => {
+test("MEASURED: without testLocationInResults rows POST with source-derived lines and one notice", async (t) => {
   if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
   const srv = await captureServer();
   try {
     const result = await runJest("no-location.config.mjs", srv.url);
-    assert.equal(srv.captured.length, 0, "no line numbers -> no rows -> no POST");
-    assert.match(result.stderr, /dropped \d+ test result/);
+    assert.equal(srv.captured.length, 1, `rows ship although Jest reports no location: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 6, JSON.stringify(specs.map((s) => s.name)));
+    const byName = new Map<string, SpecRow>(specs.map((s) => [s.name, s]));
+
+    // The derived lines equal the exact lines the location-on config reports.
+    assert.equal(byName.get("passing suite > child ok")?.line_number, fixtureLineOf("mixed.test.js", '  it("child ok"'));
+    assert.equal(byName.get("passing suite > inner suite > grandchild ok")?.line_number, fixtureLineOf("mixed.test.js", '    it("grandchild ok"'));
+    assert.equal(byName.get("passing suite > child failing")?.line_number, fixtureLineOf("mixed.test.js", '  it("child failing"'));
+    assert.equal(byName.get("passing suite > child skipped")?.line_number, fixtureLineOf("mixed.test.js", '  it.skip("child skipped"'));
+    assert.equal(byName.get("passing suite > child todo")?.line_number, fixtureLineOf("mixed.test.js", '  it.todo("child todo"'));
+    assert.equal(byName.get("top level ok")?.line_number, fixtureLineOf("mixed.test.js", 'it("top level ok"'));
+
+    // Exactly one notice naming the setting; the old dropped warning is gone.
+    const notices = result.stderr.match(/derived from the test source/g) ?? [];
+    assert.equal(notices.length, 1, result.stderr);
     assert.match(result.stderr, /testLocationInResults/);
+    assert.ok(!/dropped \d+ test result/.test(result.stderr), result.stderr);
     assert.ok(!/unhandled rejection/i.test(result.stderr), result.stderr);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("MEASURED: derived lines leave row ids identical to the exact-line run", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    await runJest("no-location.config.mjs", srv.url);
+    await runJest("jest.config.mjs", srv.url, {}, "fixtures/jest/mixed.test.js");
+    const derived = srv.captured[0]!.body.specs.map((s) => s.id).sort();
+    const exact = srv.captured[1]!.body.specs.map((s) => s.id).sort();
+    assert.deepEqual(derived, exact);
   } finally {
     await srv.close();
   }

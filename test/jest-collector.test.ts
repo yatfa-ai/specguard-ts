@@ -79,16 +79,150 @@ test("failed maps to failed; skip-family (pending/todo/skipped/disabled) map to 
   assert.equal(collector.dropped, 0);
 });
 
-test("a null location (no testLocationInResults) drops the row, counted", () => {
-  const collector = collect([
-    suite([
-      jestAssertion({ title: "no-loc", location: null }),
-      jestAssertion({ title: "kept", location: { line: 4, column: 1 } }),
-    ]),
-  ]);
+/** Collect with an in-memory "filesystem": path -> source text (missing path = unreadable). */
+function collectWithSources(
+  suites: JestSuiteResult[],
+  sources: Record<string, string>,
+): JestCollector {
+  const reads: string[] = [];
+  const collector = new JestCollector(
+    "/repo",
+    1_000,
+    (path) => {
+      reads.push(path);
+      const text = sources[path];
+      if (text === undefined) throw new Error("ENOENT");
+      return text;
+    },
+  );
+  collector.onRunComplete({ testResults: suites } satisfies JestRunResult);
+  (collector as unknown as { reads: string[] }).reads = reads;
+  return collector;
+}
+
+const SOURCE = [
+  'describe("suite", () => {', //                1
+  '  it("first", () => {});', //                 2
+  "  // it(\"commented out\", () => {});", //    3
+  '  it.only("second", () => {});', //           4
+  "  test.concurrent('third', async () => {});", // 5
+  "  it(", //                                    6
+  '    "multi line",', //                        7
+  "    () => {},", //                            8
+  "  );", //                                     9
+  '  it("dup", () => {});', //                  10
+  '  it("dup", () => {});', //                  11
+  '  it.each([1, 2])("each %i", () => {});', // 12
+  "});",
+].join("\n");
+
+test("a null location (no testLocationInResults) derives the line from the suite's source, counted", () => {
+  const collector = collectWithSources(
+    [
+      suite(
+        [
+          jestAssertion({ title: "first", location: null }),
+          jestAssertion({ title: "second", location: undefined, ancestorTitles: ["suite"] }),
+          jestAssertion({ title: "third", location: null }),
+          jestAssertion({ title: "multi line", location: null }),
+          jestAssertion({ title: "kept", location: { line: 4, column: 1 } }),
+        ],
+        "/repo/a.test.js",
+      ),
+    ],
+    { "/repo/a.test.js": SOURCE },
+  );
+  const lines = Object.fromEntries(collector.getRows().map((r) => [r.name, r.line_number]));
+  assert.deepEqual(lines, { first: 2, "suite > second": 4, third: 5, "multi line": 6, kept: 4 });
+  assert.equal(collector.linesDerived, 4);
+  assert.equal(collector.linesFallback, 0);
+  assert.equal(collector.dropped, 0);
+});
+
+test("a commented-out call is not matched: its line is skipped", () => {
+  const collector = collectWithSources(
+    [suite([jestAssertion({ title: "commented out", location: null })], "/repo/a.test.js")],
+    { "/repo/a.test.js": SOURCE },
+  );
+  assert.equal(collector.getRows()[0]!.line_number, 1);
+  assert.equal(collector.linesFallback, 1);
+});
+
+test("repeated titles map to successive source occurrences in testResults order", () => {
+  const collector = collectWithSources(
+    [
+      suite(
+        [
+          jestAssertion({ title: "dup", location: null }),
+          jestAssertion({ title: "dup", location: null }),
+          jestAssertion({ title: "dup", location: null }), // more results than source calls
+        ],
+        "/repo/a.test.js",
+      ),
+    ],
+    { "/repo/a.test.js": SOURCE },
+  );
+  assert.deepEqual(collector.getRows().map((r) => r.line_number), [10, 11, 1]);
+  assert.equal(collector.linesDerived, 2);
+  assert.equal(collector.linesFallback, 1);
+});
+
+test("an it.each templated title falls back to line 1 rather than dropping the row", () => {
+  const collector = collectWithSources(
+    [
+      suite(
+        [
+          jestAssertion({ title: "each 1", location: null }),
+          jestAssertion({ title: "each 2", location: null }),
+        ],
+        "/repo/a.test.js",
+      ),
+    ],
+    { "/repo/a.test.js": SOURCE },
+  );
+  assert.deepEqual(collector.getRows().map((r) => r.line_number), [1, 1]);
+  assert.equal(collector.linesFallback, 2);
+  assert.equal(collector.dropped, 0);
+});
+
+test("an unreadable source file falls back to line 1 for every row, never throws", () => {
+  const collector = collectWithSources(
+    [suite([jestAssertion({ title: "first", location: null })], "/repo/missing.test.js")],
+    {},
+  );
   assert.equal(collector.getRows().length, 1);
-  assert.equal(collector.getRows()[0]!.name, "kept");
-  assert.equal(collector.dropped, 1);
+  assert.equal(collector.getRows()[0]!.line_number, 1);
+  assert.equal(collector.linesFallback, 1);
+  assert.equal(collector.dropped, 0);
+});
+
+test("the source is read once per suite, and not at all when Jest reported every location", () => {
+  const derived = collectWithSources(
+    [
+      suite(
+        [
+          jestAssertion({ title: "first", location: null }),
+          jestAssertion({ title: "second", location: null }),
+        ],
+        "/repo/a.test.js",
+      ),
+    ],
+    { "/repo/a.test.js": SOURCE },
+  );
+  assert.deepEqual((derived as unknown as { reads: string[] }).reads, ["/repo/a.test.js"]);
+  const exact = collectWithSources([suite([jestAssertion({ title: "first" })], "/repo/a.test.js")], {});
+  assert.deepEqual((exact as unknown as { reads: string[] }).reads, []);
+});
+
+test("the row id does not depend on where the line came from", () => {
+  const derived = collectWithSources(
+    [suite([jestAssertion({ title: "first", location: null })], "/repo/a.test.js")],
+    { "/repo/a.test.js": SOURCE },
+  );
+  const exact = collect([
+    suite([jestAssertion({ title: "first", location: { line: 99, column: 1 } })], "/repo/a.test.js"),
+  ]);
+  assert.equal(derived.getRows()[0]!.id, exact.getRows()[0]!.id);
 });
 
 test("an unrecognized status is not a result: dropped, not guessed", () => {
