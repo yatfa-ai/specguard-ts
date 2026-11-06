@@ -2,6 +2,7 @@ import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
+import { msToSeconds } from "../core/duration.js";
 
 /**
  * Structural types for the Jest 30 reporter API this collector reads —
@@ -217,10 +218,8 @@ export class JestCollector {
     }
 
     const durationMs = test?.duration;
-    const duration =
-      typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
-        ? durationMs / 1000 // the wire field is SECONDS; Jest reports MILLISECONDS
-        : null; // skip-family tests carry duration null — never fabricate
+    // Jest reports MILLISECONDS; skip-family tests carry duration null — never fabricate.
+    const duration = msToSeconds(durationMs);
 
     const outcome =
       status === "failed" ? "failed" : status === "passed" ? "passed" : "pending";
