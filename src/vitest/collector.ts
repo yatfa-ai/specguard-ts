@@ -2,6 +2,7 @@ import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
+import { msToSeconds } from "../core/duration.js";
 
 /**
  * Structural types for the Vitest 4 reporter API this collector reads —
@@ -289,10 +290,8 @@ export class VitestCollector {
     } catch {
       durationMs = undefined;
     }
-    const duration =
-      typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
-        ? durationMs / 1000 // the wire field is SECONDS; Vitest reports MILLISECONDS
-        : null; // skipped tests carry no diagnostic — duration ships null
+    // Vitest reports MILLISECONDS; skipped tests carry no diagnostic — duration ships null.
+    const duration = msToSeconds(durationMs);
 
     // Both skip and todo surface as state "skipped" — deliberately shipped
     // with outcome "pending", never silently counted as a pass.

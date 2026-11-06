@@ -2,6 +2,7 @@ import { relative, isAbsolute, sep } from "node:path";
 import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
+import { msToSeconds } from "../core/duration.js";
 
 /**
  * The shape of `ev.data` on the `node:test` reporter events this collector
@@ -123,10 +124,8 @@ export class RunCollector {
 
     const filePath = this.relativize(file);
     const durationMs = data.details?.duration_ms;
-    const duration =
-      typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
-        ? durationMs / 1000 // the wire field is SECONDS; node reports MILLISECONDS
-        : null;
+    // node reports MILLISECONDS.
+    const duration = msToSeconds(durationMs);
 
     // A skipped test emits test:pass with skip: true — it is deliberately
     // shipped with outcome "pending", never silently counted as a pass.
@@ -160,10 +159,7 @@ export class RunCollector {
     const filePath = this.relativize(file);
     if (this.filesWithFailedRow.has(filePath)) return;
     const durationMs = data.details?.duration_ms;
-    const duration =
-      typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
-        ? durationMs / 1000
-        : null;
+    const duration = msToSeconds(durationMs);
     this.filesWithFailedRow.add(filePath);
     this.rows.push(fileFailedRow(filePath, duration));
   }
@@ -206,10 +202,7 @@ export class RunCollector {
   private resolveSuiteFailures(): void {
     for (const [filePath, durationMs] of this.pendingSuiteFailures) {
       if (this.filesWithFailedRow.has(filePath)) continue;
-      const duration =
-        typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
-          ? durationMs / 1000
-          : null;
+      const duration = msToSeconds(durationMs);
       this.filesWithFailedRow.add(filePath);
       this.rows.push(fileFailedRow(filePath, duration));
     }
