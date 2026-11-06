@@ -730,3 +730,42 @@ test("end to end: a file whose tests fail normally gains no file row", async () 
     await srv.close();
   }
 });
+
+test("end to end: a describe whose after() hook throws ships ONE failed file row beside the passing child", async () => {
+  const srv = await captureServer();
+  try {
+    const result = await runNodeTest("hook-after.test.js", srv.url);
+    assert.equal(result.code, 1, `the hook failure is the suite's own failure: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    assert.deepEqual(
+      specs.map((s) => [s.name, s.outcome, s.line_number]),
+      [
+        ["teardown > still passes", "passed", specs[0]!.line_number],
+        ["fixtures/hook-after.test.js > (test file failed to run)", "failed", 1],
+      ],
+    );
+    assert.equal(specs[1]!.file_path, "fixtures/hook-after.test.js");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("end to end: a failing child under a failing suite, and a hook failure before a later failing test, ship no extra file row", async () => {
+  const srv = await captureServer();
+  try {
+    for (const [fixture, failedNames] of [
+      ["hook-after-and-failing-child.test.js", ["both > fails itself"]],
+      ["hook-after-then-failing-test.test.js", ["later > fails itself"]],
+    ] as const) {
+      srv.captured.length = 0;
+      const result = await runNodeTest(fixture, srv.url);
+      assert.equal(result.code, 1, result.stderr);
+      const specs = srv.captured[0]!.body.specs;
+      assert.deepEqual(specs.filter((s) => s.outcome === "failed").map((s) => s.name), failedNames, fixture);
+      assert.ok(!specs.some((s) => s.name.endsWith("(test file failed to run)")), fixture);
+    }
+  } finally {
+    await srv.close();
+  }
+});

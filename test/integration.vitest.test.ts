@@ -614,3 +614,44 @@ test("end to end: a Vitest file that crashes at load ships ONE failed row beside
     await srv.close();
   }
 });
+
+test("end to end: a throwing beforeAll / describe afterAll / top-level afterAll each ship ONE failed file row; their tests' own rows are unchanged", async (t) => {
+  if (vitestBin === null) return t.skip("vitest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    const result = await runVitest("hooks.config.mts", srv.url);
+    assert.equal(result.code, 1, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    const rowsOf = (file: string): SpecRow[] => specs.filter((s) => s.file_path === `fixtures/vitest/${file}`);
+    const hookRow = (file: string): string => `fixtures/vitest/${file} > (test file failed to run)`;
+
+    for (const [file, ownName, ownOutcome] of [
+      ["hook-describe-afterall.test.ts", "teardown > still passes", "passed"],
+      ["hook-before-all.test.ts", "setup > never runs", "pending"],
+      ["hook-top-afterall.test.ts", "still passes", "passed"],
+    ] as const) {
+      const rows = rowsOf(file);
+      assert.deepEqual(
+        rows.map((r) => [r.name, r.outcome]),
+        [
+          [ownName, ownOutcome],
+          [hookRow(file), "failed"],
+        ],
+        file,
+      );
+      assert.equal(rows[1]!.line_number, 1);
+    }
+
+    // a file whose test fails AND whose afterAll throws: the test is the file's one failed row
+    assert.deepEqual(
+      rowsOf("hook-with-failing-test.test.ts").map((r) => [r.name, r.outcome]),
+      [["both > fails itself", "failed"]],
+    );
+    // the healthy-hooks file is byte-for-byte what it was: 6 rows, no file row
+    assert.equal(rowsOf("mixed.test.ts").length, 6);
+    assert.ok(!rowsOf("mixed.test.ts").some((r) => r.name.endsWith("(test file failed to run)")));
+  } finally {
+    await srv.close();
+  }
+});
