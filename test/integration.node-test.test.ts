@@ -735,7 +735,8 @@ test("end to end: a describe whose after() hook throws ships ONE failed file row
   const srv = await captureServer();
   try {
     const result = await runNodeTest("hook-after.test.js", srv.url);
-    assert.equal(result.code, 1, `the hook failure is the suite's own failure: ${result.stderr}`);
+    // The exit code of a suite-level after() failure is Node-version-dependent (Node 20 exits 1, Node 22
+    // exits 0 with `# fail 0`), so it is deliberately not asserted: the shipped rows are the point.
     assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
     const specs = srv.captured[0]!.body.specs;
     assert.deepEqual(
