@@ -655,3 +655,41 @@ test("end to end: a throwing beforeAll / describe afterAll / top-level afterAll 
     await srv.close();
   }
 });
+
+test("end to end: a leaked timer throw and a floating rejection each ship ONE failed file row for a passing file; a failing file gets no extra row", async (t) => {
+  if (vitestBin === null) return t.skip("vitest not installed — adapter e2e skipped (optional peer)");
+  const srv = await captureServer();
+  try {
+    const result = await runVitest("unhandled.config.mts", srv.url);
+    assert.equal(result.code, 1, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1, `captured: ${result.stderr}`);
+    const specs = srv.captured[0]!.body.specs;
+    const rowsOf = (file: string): SpecRow[] => specs.filter((s) => s.file_path === `fixtures/vitest/${file}`);
+    const fileRow = (file: string): string => `fixtures/vitest/${file} > (test file failed to run)`;
+
+    assert.deepEqual(
+      rowsOf("unhandled-timer.test.ts").map((r) => [r.name, r.outcome]),
+      [
+        ["leaks a throwing timer", "passed"],
+        [fileRow("unhandled-timer.test.ts"), "failed"],
+      ],
+    );
+    // two floating rejections in one file: still ONE row
+    assert.deepEqual(
+      rowsOf("unhandled-rejection.test.ts").map((r) => [r.name, r.outcome]),
+      [
+        ["floats a rejection", "passed"],
+        [fileRow("unhandled-rejection.test.ts"), "failed"],
+      ],
+    );
+    assert.deepEqual(
+      rowsOf("unhandled-with-failing-test.test.ts").map((r) => [r.name, r.outcome]),
+      [["fails itself", "failed"]],
+    );
+    assert.equal(rowsOf("mixed.test.ts").length, 6);
+    assert.ok(!rowsOf("mixed.test.ts").some((r) => r.name.endsWith("(test file failed to run)")));
+    assert.ok(!/could not attribute/.test(result.stderr), result.stderr);
+  } finally {
+    await srv.close();
+  }
+});

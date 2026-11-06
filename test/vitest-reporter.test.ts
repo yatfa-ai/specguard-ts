@@ -61,6 +61,7 @@ interface Seen {
 async function runReporter(
   modules: VitestTestModule[],
   options: Partial<VitestReporterOptions> = {},
+  errors?: unknown,
 ): Promise<{ seen: Seen[]; sink: string[]; stderr: string[] }> {
   const seen: Seen[] = [];
   const sink: string[] = [];
@@ -85,7 +86,7 @@ async function runReporter(
       },
       ...options,
     });
-    await reporter.onTestRunEnd(modules);
+    await reporter.onTestRunEnd(modules, errors as readonly unknown[] | undefined);
     return { seen, sink, stderr };
   } finally {
     process.stderr.write = origWrite;
@@ -378,4 +379,53 @@ test("onInit never throws on a frozen or odd config, and the dropped-rows warnin
     process.stderr.write = realWrite;
   }
   assert.ok(stderr.some((l) => l.includes("dropped 1") && l.includes("includeTaskLocation")), stderr.join(""));
+});
+
+const MIXED_PATH = join(pkgRoot, "fixtures", "vitest", "mixed.test.ts");
+const UNATTRIBUTED_RE = /SpecGuard: Vitest reported (\d+) unhandled error\(s\) it could not attribute to a test file; they are not in the run's rows\. The test run is unaffected\./;
+
+test("an unhandled error attributed to a passing file ships ONE failed file row beside its passing rows", async () => {
+  const { seen, stderr } = await runReporter(
+    [moduleOf([vitestTest("ok", 5)])],
+    {},
+    [
+      { name: "Error", message: "boom", type: "Uncaught Exception", VITEST_TEST_PATH: MIXED_PATH },
+      { name: "Error", message: "boom 2", type: "Unhandled Rejection", VITEST_TEST_PATH: MIXED_PATH },
+    ],
+  );
+  assert.deepEqual(
+    seen[0]!.body.specs.map((s) => [s.name, s.outcome]),
+    [
+      ["ok", "passed"],
+      ["fixtures/vitest/mixed.test.ts > (test file failed to run)", "failed"],
+    ],
+  );
+  assert.ok(!stderr.some((l) => UNATTRIBUTED_RE.test(l)), stderr.join(""));
+});
+
+test("an unhandled error with no usable path warns on stderr, ships no row, and a zero-row run still posts nothing", async () => {
+  const withRows = await runReporter([moduleOf([vitestTest("ok", 5)])], {}, [
+    { message: "no path" },
+    { message: "blank", VITEST_TEST_PATH: "" },
+    { message: "elsewhere", VITEST_TEST_PATH: join(pkgRoot, "fixtures", "vitest", "other.test.ts") },
+    null,
+  ]);
+  assert.equal(withRows.seen[0]!.body.specs.length, 1);
+  assert.deepEqual(
+    withRows.stderr.map((l) => UNATTRIBUTED_RE.exec(l)?.[1]).filter(Boolean),
+    ["4"],
+  );
+
+  const zeroRows = await runReporter([moduleOf([])], {}, [{ message: "no path" }]);
+  assert.equal(zeroRows.seen.length, 0);
+  assert.equal(zeroRows.sink.length, 0);
+  assert.ok(zeroRows.stderr.some((l) => UNATTRIBUTED_RE.test(l)), zeroRows.stderr.join(""));
+});
+
+test("a malformed errors argument (not an array) is ignored: no row, no warning, no throw", async () => {
+  for (const bad of [undefined, null, "boom", 7, { VITEST_TEST_PATH: MIXED_PATH }]) {
+    const { seen, stderr } = await runReporter([moduleOf([vitestTest("ok", 5)])], {}, bad);
+    assert.equal(seen[0]!.body.specs.length, 1, String(bad));
+    assert.ok(!stderr.some((l) => UNATTRIBUTED_RE.test(l)), String(bad));
+  }
 });

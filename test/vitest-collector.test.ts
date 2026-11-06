@@ -408,3 +408,74 @@ test("a hook failure in a module with no usable module id is dropped and counted
   assert.equal(collector.getRows().length, 0); // the test row needs the id too
   assert.ok(collector.dropped >= 1);
 });
+
+// ---- run-level unhandled errors (SPGD-2086) --------------------------------
+
+const UNHANDLED_ROW_NAME = "fixtures/vitest/mixed.test.ts > (test file failed to run)";
+const MIXED_ID = "/repo/fixtures/vitest/mixed.test.ts";
+
+function collectWithErrors(mods: VitestTestModule[], errors: unknown): VitestCollector {
+  const collector = new VitestCollector("/repo", 1_000);
+  collector.onTestRunEnd(mods, errors);
+  return collector;
+}
+
+test("unhandled errors in a passing file ship exactly one failed file row, however many errors", () => {
+  const collector = collectWithErrors(
+    [module([vitestTest({ name: "ok" })])],
+    [
+      { type: "Uncaught Exception", VITEST_TEST_PATH: MIXED_ID },
+      { type: "Unhandled Rejection", VITEST_TEST_PATH: MIXED_ID },
+    ],
+  );
+  const rows = collector.getRows();
+  assert.deepEqual(rows.map((r) => [r.name, r.outcome, r.line_number, r.duration]), [
+    ["ok", "passed", 10, 1.5],
+    [UNHANDLED_ROW_NAME, "failed", 1, null],
+  ]);
+  assert.equal(collector.unattributedErrors, 0);
+});
+
+test("an unhandled error in a file with a failing test adds no extra row", () => {
+  const failing = vitestTest({ name: "bad", result: () => ({ state: "failed" }) });
+  const collector = collectWithErrors([module([failing])], [{ VITEST_TEST_PATH: MIXED_ID }]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), ["bad"]);
+  assert.equal(collector.unattributedErrors, 0);
+});
+
+test("a file already given a file-failure row (module error) is not double-counted by an unhandled error", () => {
+  const crashed: VitestTestModule = { ...module([]), errors: () => [new Error("load")] };
+  const collector = collectWithErrors([crashed], [{ VITEST_TEST_PATH: MIXED_ID }]);
+  assert.deepEqual(collector.getRows().map((r) => r.name), [UNHANDLED_ROW_NAME]);
+});
+
+test("unhandled errors only mark their own file; others stay untouched", () => {
+  const collector = collectWithErrors(
+    [module([vitestTest({ name: "a" })]), module([vitestTest({ name: "b" })], "/repo/fixtures/vitest/other.test.ts")],
+    [{ VITEST_TEST_PATH: "/repo/fixtures/vitest/other.test.ts" }],
+  );
+  assert.deepEqual(collector.getRows().map((r) => [r.file_path, r.name]), [
+    ["fixtures/vitest/mixed.test.ts", "a"],
+    ["fixtures/vitest/other.test.ts", "b"],
+    ["fixtures/vitest/other.test.ts", "fixtures/vitest/other.test.ts > (test file failed to run)"],
+  ]);
+});
+
+test("errors with no path or a path matching no module count as unattributed and ship no row", () => {
+  const collector = collectWithErrors([module([vitestTest({ name: "ok" })])], [
+    {},
+    { VITEST_TEST_PATH: 5 },
+    { VITEST_TEST_PATH: "/repo/not-collected.test.ts" },
+    "string error",
+  ]);
+  assert.equal(collector.getRows().length, 1);
+  assert.equal(collector.unattributedErrors, 4);
+});
+
+test("no errors, or a non-array errors argument, leaves the rows exactly as before", () => {
+  for (const errors of [undefined, [], null, "x", {}]) {
+    const collector = collectWithErrors([module([vitestTest({ name: "ok" })])], errors);
+    assert.equal(collector.getRows().length, 1);
+    assert.equal(collector.unattributedErrors, 0);
+  }
+});

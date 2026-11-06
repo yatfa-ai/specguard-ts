@@ -150,13 +150,19 @@ export class SpecguardVitestReporter {
    */
   async onTestRunEnd(
     modules: readonly unknown[],
-    _errors?: readonly unknown[],
+    errors?: readonly unknown[],
     _reason?: string,
   ): Promise<void> {
     try {
       const repoRoot = this.options.repoRoot ?? process.cwd();
       const collector = new VitestCollector(repoRoot, this.startedAtMs);
-      collector.onTestRunEnd(modules);
+      collector.onTestRunEnd(modules, errors);
+
+      if (collector.unattributedErrors > 0) {
+        process.stderr.write(
+          `SpecGuard: Vitest reported ${collector.unattributedErrors} unhandled error(s) it could not attribute to a test file; they are not in the run's rows. The test run is unaffected.\n`,
+        );
+      }
 
       if (collector.dropped > 0) {
         process.stderr.write(

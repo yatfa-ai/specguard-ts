@@ -103,15 +103,31 @@ export class VitestCollector {
   private readonly repoRoot: string;
   /** Rows dropped for a missing/invalid line, name, or outcome — warned once at the end. */
   dropped = 0;
+  /**
+   * Run-level unhandled errors (Vitest's "Unhandled Errors") that carried no
+   * usable test-file path, or a path matching no collected module — warned
+   * once at the end, never shipped as a row.
+   */
+  unattributedErrors = 0;
 
   constructor(repoRoot: string, startedAtMs: number = Date.now()) {
     this.repoRoot = repoRoot;
     this.startedAtMs = startedAtMs;
   }
 
-  /** Consume one `onTestRunEnd` module list. Never throws. */
-  onTestRunEnd(modules: readonly unknown[]): void {
+  /**
+   * Consume one `onTestRunEnd` module list, plus the run-level `errors`
+   * array Vitest passes as the hook's second argument. Never throws.
+   */
+  onTestRunEnd(modules: readonly unknown[], errors?: unknown): void {
+    const collectedFiles = new Set<string>();
     for (const mod of modules) {
+      try {
+        const id = readModuleId(mod);
+        if (typeof id === "string" && id !== "") collectedFiles.add(this.relativize(id));
+      } catch {
+        // a surprising module never fails the run
+      }
       let tests: VitestTestCase[] = [];
       try {
         const iterable = readModuleChildren(mod)?.allTests?.();
@@ -140,6 +156,56 @@ export class VitestCollector {
       // all-skipped module is not a crash.
       const ownFailedRow = this.rows.slice(rowsBefore).some((r) => r.outcome === "failed");
       if (!ownFailedRow) this.addFileFailure(mod);
+    }
+    this.addUnhandledErrors(collectedFiles, errors);
+  }
+
+  /**
+   * Vitest exits 1 ("Errors N errors") when an error escapes a test — a throw
+   * in a leaked timer ("Uncaught Exception"), a floating rejection
+   * ("Unhandled Rejection") — even though every test passed. Those errors
+   * arrive only in `onTestRunEnd`'s second argument, each tagged with the
+   * `VITEST_TEST_PATH` of the file whose test was running (equal to the
+   * module's `moduleId`; the run `reason` is "passed" on such a red run, so
+   * the errors array, never the reason, is the discriminator).
+   *
+   * An error attributed to a collected file that has no failed row of its own
+   * ships that file's ONE failed file row (several errors, one row; a failed
+   * test or an earlier file-failure row already makes the file red). An error
+   * with no usable path, or a path matching no collected file, is counted so
+   * the reporter can say so on stderr; it ships no row.
+   */
+  private addUnhandledErrors(collectedFiles: ReadonlySet<string>, errors: unknown): void {
+    try {
+      if (!Array.isArray(errors)) return;
+      const failedFiles = new Set(
+        this.rows.filter((r) => r.outcome === "failed").map((r) => r.file_path),
+      );
+      for (const error of errors as unknown[]) {
+        try {
+          const path =
+            error !== null && typeof error === "object"
+              ? (error as { VITEST_TEST_PATH?: unknown }).VITEST_TEST_PATH
+              : undefined;
+          if (typeof path !== "string" || path === "") {
+            this.unattributedErrors += 1;
+            continue;
+          }
+          const file = this.relativize(path);
+          if (!collectedFiles.has(file)) {
+            this.unattributedErrors += 1;
+            continue;
+          }
+          if (failedFiles.has(file)) continue;
+          // No honest duration: the error belongs to the run, not a timed test.
+          this.rows.push(fileFailedRow(file, null));
+          failedFiles.add(file);
+        } catch {
+          this.unattributedErrors += 1;
+        }
+      }
+    } catch {
+      // never fails the run
     }
   }
 
