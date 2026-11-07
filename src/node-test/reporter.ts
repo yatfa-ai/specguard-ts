@@ -1,15 +1,13 @@
 import { RunCollector } from "./collector.js";
 import type { TestEventData } from "./collector.js";
-import { annotateRows } from "./annotate.js";
-import { buildEnvelope } from "../core/envelope.js";
-import { uniquifyRows } from "../core/id.js";
 import {
   readRunnerEnv,
   shardIndexFromTestShardFlag,
   withNativeShard,
   type RunnerEnv,
 } from "../core/env.js";
-import { deliver, type TransportDeps } from "../core/transport.js";
+import { shipRun } from "../core/ship-run.js";
+import type { TransportDeps } from "../core/transport.js";
 
 export interface ReporterEvent {
   type: string;
@@ -108,33 +106,16 @@ async function finish(
   repoRoot: string,
 ): Promise<void> {
   try {
-    const rows = uniquifyRows(collector.getRows());
-
     if (collector.dropped > 0) {
       process.stderr.write(
         `SpecGuard: dropped ${collector.dropped} test result(s) with no usable file/line. The test run is unaffected.\n`,
       );
     }
 
-    // A run that reported zero tests has nothing to say — no POST, no file.
-    if (rows.length === 0) return;
-
-    // Slice 4: attempt the annotation pass. It never throws and never
-    // changes the exit code — on any failure the slice-1 rows ship as-is
-    // (the pass itself emits at most one warning line). `repoRoot` is the
-    // value bound at run start, the same one the collector relativized
-    // against, so discovery and the coordinate join share one root.
-    const annotated = annotateRows(rows, { repoRoot });
-
-    const envelope = buildEnvelope(annotated.rows, env, collector.durationSeconds());
-    if (envelope === null) {
-      process.stderr.write(
-        "SpecGuard: no commit sha could be resolved (set SPECGUARD_COMMIT_SHA); telemetry not sent. The test run is unaffected.\n",
-      );
-      return;
-    }
-
-    await deliver(envelope, env, options.transport);
+    // `repoRoot` is the value bound at run start, the same one the collector
+    // relativized against, so discovery and the coordinate join share one
+    // root. The shared pipeline does not catch; this guard's catch does.
+    await shipRun(collector, { env, repoRoot, transport: options.transport });
   } catch {
     // The never-fail guarantee: nothing here reaches the exit code.
   }
