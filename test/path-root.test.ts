@@ -165,6 +165,26 @@ test("resolveRunRoots: a nested repository as cwd resolves to its OWN toplevel",
   assert.deepEqual(resolveRunRoots(undefined, inner), { pathRoot: inner, walkRoot: inner });
 });
 
+test("resolveRunRoots: a git answer that does not contain the cwd falls back to the cwd", () => {
+  const work = tmp();
+  gitInit(work);
+  const outside = tmp();
+  const saved = { dir: process.env.GIT_DIR, tree: process.env.GIT_WORK_TREE };
+  // GIT_DIR + GIT_WORK_TREE (git hooks, some CI wrappers) make git answer the work tree even from a cwd outside it.
+  process.env.GIT_DIR = path.join(work, ".git");
+  process.env.GIT_WORK_TREE = work;
+  try {
+    const probe = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: outside, encoding: "utf8" }).trim();
+    assert.equal(fs.realpathSync(probe), work); // control: git really answers a toplevel that does not contain the cwd
+    assert.deepEqual(resolveRunRoots(undefined, outside), { pathRoot: outside, walkRoot: outside });
+  } finally {
+    if (saved.dir === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved.dir;
+    if (saved.tree === undefined) delete process.env.GIT_WORK_TREE;
+    else process.env.GIT_WORK_TREE = saved.tree;
+  }
+});
+
 test("node:test: packages a and b ship DISTINCT file_paths for the same package-relative test file", async () => {
   const top = monorepo();
   const rowsA = await nodeTestRows(
