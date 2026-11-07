@@ -158,7 +158,7 @@ One more, discovered while testing: **a test file that contains zero tests emits
 for the file itself** (its name is the file path — absolute on Node 20, relative to the working directory on
 newer Node). It is filtered; a zero-test file ships nothing and crashes nothing.
 
-**Compiled TypeScript maps back to its sources.** With the common `tsc` → `node --test dist/` flow, Node
+**Compiled TypeScript maps back to its sources.** With the common `tsc` → `node --test` over your compiled output flow, Node
 reports every test against the compiled file (`dist/cart.test.js`, at the compiled line) unless it runs with
 `--enable-source-maps`, and `@intent` annotations — which live in the `.ts` source — would then never meet
 their rows. The reporter closes that gap itself: when a reported `.js` / `.mjs` / `.cjs` file ends with a

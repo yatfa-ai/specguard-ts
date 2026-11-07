@@ -7,7 +7,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import type { Envelope } from "../src/core/types.js";
@@ -21,7 +21,7 @@ const tscPath = join(pkgRoot, "node_modules", "typescript", "lib", "tsc.js");
 
 /**
  * The compiled-TypeScript flow: a real tsc-compiled project (`sourceMap: true`),
- * run with `node --test dist/` and the BUILT reporter, with and without
+ * run with `node --test dist/*.test.js` and the BUILT reporter, with and without
  * `--enable-source-maps`. The validate-intent backend is a stub that ratifies
  * the annotations in `src/cart.test.ts` (the lint walk fences `dist`, so
  * findings are always keyed at the TypeScript source).
@@ -160,7 +160,7 @@ interface Run {
   specs: Envelope["specs"];
 }
 
-/** `node --test dist/` in `project`, optionally with `--enable-source-maps`. */
+/** `node --test dist/*.test.js` (explicit files) in `project`, optionally with `--enable-source-maps`. */
 async function run(project: Project, flags: string[] = []): Promise<Run> {
   const srv = await captureServer();
   const backendDir = mkdtempSync(join(tmpdir(), "specguard-ts-sm-validator-"));
@@ -175,12 +175,18 @@ async function run(project: Project, flags: string[] = []): Promise<Run> {
     SPECGUARD_VALIDATE_INTENT: stubBackend(backendDir),
   };
   delete env.NODE_TEST_CONTEXT;
+  // Explicit compiled files, not `dist/`: on Node 22+ a positional argument is a file or glob,
+  // never a directory to recurse into.
+  const compiled = readdirSync(join(project.root, "dist"))
+    .filter((f) => f.endsWith(".test.js"))
+    .sort()
+    .map((f) => `dist/${f}`);
   let code = 0;
   let stderr = "";
   try {
     const out = await execFileAsync(
       process.execPath,
-      ["--test", ...flags, `--test-reporter=${reporterPath}`, "dist/"],
+      ["--test", ...flags, `--test-reporter=${reporterPath}`, ...compiled],
       { cwd: project.root, env },
     );
     stderr = out.stderr;
