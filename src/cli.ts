@@ -60,13 +60,15 @@ export function run(argv: string[], stdout: NodeJS.WriteStream, stderr: NodeJS.W
   const subcommand = argv[0];
 
   if (subcommand === undefined || subcommand === "--help" || subcommand === "-h") {
-    usage(subcommand === undefined ? stdout : stderr);
-    if (subcommand === undefined) {
-      stdout.write("\nCommands: lint\n");
-    } else {
-      stdout.write("\nCommands: lint\n");
-    }
-    return subcommand === undefined ? 2 : 0;
+    // Route by exit intent: asking for help (exit 0) answers on stdout; the
+    // no-argument misuse (exit 2) is a diagnostic and goes to stderr — the same
+    // rule as the unknown-command and `lint --help` arms below. The whole
+    // message (banner + command list) follows onto the one chosen stream.
+    const help = subcommand !== undefined;
+    const stream = help ? stdout : stderr;
+    usage(stream);
+    stream.write("\nCommands: lint\n");
+    return help ? 0 : 2;
   }
 
   if (subcommand === "--version" || subcommand === "-v") {
