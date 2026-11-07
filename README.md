@@ -158,6 +158,19 @@ One more, discovered while testing: **a test file that contains zero tests emits
 for the file itself** (its name is the file path — absolute on Node 20, relative to the working directory on
 newer Node). It is filtered; a zero-test file ships nothing and crashes nothing.
 
+**Compiled TypeScript maps back to its sources.** With the common `tsc` → `node --test` over your compiled output flow, Node
+reports every test against the compiled file (`dist/cart.test.js`, at the compiled line) unless it runs with
+`--enable-source-maps`, and `@intent` annotations — which live in the `.ts` source — would then never meet
+their rows. The reporter closes that gap itself: when a reported `.js` / `.mjs` / `.cjs` file ends with a
+`//# sourceMappingURL=` trailer (a sibling `.map` file or an inline `data:` URL), the row ships under the
+TypeScript source path and line the map names, exactly as `--enable-source-maps` would report it — the two
+spellings produce identical rows and identical ids. A crashed compiled file is named by its source the same
+way. This needs `sourceMap: true` (or `inlineSourceMap`) in your `tsconfig.json`. The mapping is best-effort
+and never fails the run: if the map is missing or unreadable, has no entry for the position, or names a
+source that is outside the repository, under `node_modules` or not on disk, the row ships with the compiled
+path and line, as it always has. If annotations still do not attribute, check that the map is being emitted
+and that `--enable-source-maps` makes no difference.
+
 **A test file that fails to run at all is not dropped.** A syntax error, a throwing top-level statement or a
 missing import fails the file before any test exists, so there are no test rows to ship — and silently
 shipping nothing would make the suite look smaller instead of broken. Every adapter (`node:test`, Vitest and

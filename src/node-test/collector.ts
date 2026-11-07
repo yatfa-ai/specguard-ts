@@ -4,6 +4,7 @@ import type { SpecRow } from "../core/types.js";
 import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
 import { msToSeconds } from "../core/duration.js";
+import { SourceMapResolver } from "./source-map.js";
 
 /**
  * The shape of `ev.data` on the `node:test` reporter events this collector
@@ -58,11 +59,18 @@ export class RunCollector {
   private readonly pendingSuiteFailures = new Map<string, number | undefined>();
   private readonly startedAtMs: number;
   private readonly repoRoot: string;
+  /**
+   * Maps rows the runner reported against compiled JavaScript (`tsc` →
+   * `node --test dist/`, no `--enable-source-maps`) back to their TypeScript
+   * source — the coordinates the runner reports itself with the flag.
+   */
+  private readonly sourceMaps: SourceMapResolver;
   /** Rows dropped for a missing/invalid line or file — warned once at the end. */
   dropped = 0;
 
   constructor(repoRoot: string, startedAtMs: number = Date.now()) {
     this.repoRoot = repoRoot;
+    this.sourceMaps = new SourceMapResolver(repoRoot);
     this.startedAtMs = startedAtMs;
   }
 
@@ -123,7 +131,11 @@ export class RunCollector {
       return;
     }
 
-    const filePath = this.relativize(file);
+    // A compiled file with a usable source map ships under its source's path
+    // and line; any failure keeps the coordinates the runner reported.
+    const mapped = this.sourceMaps.resolve(file, line, data.column);
+    const filePath = mapped === null ? this.relativize(file) : this.relativize(mapped.file);
+    const rowLine = mapped === null ? line : mapped.line;
     const durationMs = data.details?.duration_ms;
     // node reports MILLISECONDS.
     const duration = msToSeconds(durationMs);
@@ -132,10 +144,15 @@ export class RunCollector {
     // shipped with outcome "pending", never silently counted as a pass.
     const outcome = kind === "fail" ? "failed" : data.skip === true ? "pending" : "passed";
 
-    if (outcome === "failed") this.filesWithFailedRow.add(filePath);
+    if (outcome === "failed") {
+      this.filesWithFailedRow.add(filePath);
+      // The compiled spelling too: the file-level event of a crashed file
+      // is keyed by it when the map names several sources.
+      this.filesWithFailedRow.add(this.relativize(file));
+    }
     this.rows.push({
       file_path: filePath,
-      line_number: line,
+      line_number: rowLine,
       status: "unannotated",
       intent: null,
       name: composedName,
@@ -157,7 +174,8 @@ export class RunCollector {
       this.dropped += 1;
       return;
     }
-    const filePath = this.relativize(file);
+    if (this.filesWithFailedRow.has(this.relativize(file))) return;
+    const filePath = this.fileKey(file);
     if (this.filesWithFailedRow.has(filePath)) return;
     const durationMs = data.details?.duration_ms;
     const duration = msToSeconds(durationMs);
@@ -174,7 +192,8 @@ export class RunCollector {
   private onSuiteFailed(data: TestEventData): void {
     const file = data.file;
     if (typeof file !== "string" || file === "") return; // not attributable to a file; the run is still red in node's own output
-    const filePath = this.relativize(file);
+    if (this.filesWithFailedRow.has(this.relativize(file))) return;
+    const filePath = this.fileKey(file);
     if (this.filesWithFailedRow.has(filePath) || this.pendingSuiteFailures.has(filePath)) return;
     this.pendingSuiteFailures.set(filePath, data.details?.duration_ms);
   }
@@ -212,6 +231,15 @@ export class RunCollector {
 
   durationSeconds(nowMs: number = Date.now()): number {
     return Math.max(0, (nowMs - this.startedAtMs) / 1000);
+  }
+
+  /**
+   * The repo-relative name of a test FILE for file-level rows: its TypeScript
+   * source when a source map names one, otherwise the reported path.
+   */
+  private fileKey(file: string): string {
+    const source = this.sourceMaps.resolveFile(file);
+    return this.relativize(source === null ? file : source);
   }
 
   private relativize(file: string): string {
