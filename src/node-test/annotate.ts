@@ -70,8 +70,10 @@ export interface AnnotationOutcome {
 }
 
 export interface AnnotateDeps extends ValidatorDeps {
-  /** Repo root used both for discovery and file normalization (defaults to cwd). */
+  /** Root that file keys are made relative to (defaults to cwd). */
   repoRoot?: string;
+  /** Root the `@intent:` discovery walk scans (defaults to `repoRoot`). */
+  walkRoot?: string;
   /** Warning sink (defaults to one line on process.stderr). */
   warn?: (message: string) => void;
 }
@@ -112,12 +114,16 @@ export function normalizeRepoPath(file: string, repoRoot: string): string {
  */
 export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}): AnnotationOutcome {
   const warn = deps.warn ?? ((message: string) => process.stderr.write(`${message}\n`));
+  // Two roots, never one: keys (row `file_path`, finding keys) are made
+  // relative to `repoRoot`; discovery walks only `walkRoot`, so a run from a
+  // monorepo package never scans the whole monorepo.
   const repoRoot = deps.repoRoot ?? process.cwd();
+  const walkRoot = deps.walkRoot ?? repoRoot;
 
   if (rows.length === 0) return { rows: [...rows], annotated: 0, degraded: false };
 
   try {
-    const selection = selectFiles([], repoRoot);
+    const selection = selectFiles([], walkRoot);
     if (selection.files.length === 0) return { rows: [...rows], annotated: 0, degraded: false };
 
     // The token gate from lint: a repository with no `@intent:` tokens needs

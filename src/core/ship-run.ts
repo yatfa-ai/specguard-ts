@@ -14,8 +14,10 @@ export interface ShippableCollector {
 
 export interface ShipRunOptions {
   env: RunnerEnv;
-  /** The repo root bound at run start (relativizing and annotation join). */
+  /** The path root bound at run start (relativizing and annotation join). */
   repoRoot: string;
+  /** Where the annotation walk scans; defaults to `repoRoot`. */
+  walkRoot?: string | undefined;
   validator?: ValidatorDeps | undefined;
   transport?: TransportDeps | undefined;
 }
@@ -42,6 +44,7 @@ export async function shipRun(
   // failure the unannotated rows ship as-is.
   const annotated = annotateRows(rows, {
     repoRoot: options.repoRoot,
+    ...(options.walkRoot === undefined ? {} : { walkRoot: options.walkRoot }),
     ...options.validator,
   });
 

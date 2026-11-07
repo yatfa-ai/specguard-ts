@@ -1,5 +1,6 @@
 import { VitestCollector } from "./collector.js";
 import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
+import { resolveRunRoots } from "../core/path-root.js";
 import { shipRun } from "../core/ship-run.js";
 import type { TransportDeps } from "../core/transport.js";
 import type { ValidatorDeps } from "../core/validator.js";
@@ -16,7 +17,7 @@ export type {
 export interface VitestReporterOptions {
   /** Overrides the process environment (tests). */
   env?: RunnerEnv;
-  /** Repo root for relativizing file paths (tests). Defaults to cwd. */
+  /** Root file paths are made relative to (tests). Defaults to the git toplevel of the cwd, or the cwd itself when git cannot say. */
   repoRoot?: string;
   /** Transport injection (tests). */
   transport?: TransportDeps;
@@ -152,7 +153,7 @@ export class SpecguardVitestReporter {
     _reason?: string,
   ): Promise<void> {
     try {
-      const repoRoot = this.options.repoRoot ?? process.cwd();
+      const { pathRoot: repoRoot, walkRoot } = resolveRunRoots(this.options.repoRoot);
       const collector = new VitestCollector(repoRoot, this.startedAtMs);
       collector.onTestRunEnd(modules, errors);
 
@@ -171,6 +172,7 @@ export class SpecguardVitestReporter {
       await shipRun(collector, {
         env: this.env,
         repoRoot,
+        walkRoot,
         validator: this.options.validator,
         transport: this.options.transport,
       });
