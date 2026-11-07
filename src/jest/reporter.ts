@@ -1,9 +1,7 @@
 import { JestCollector } from "./collector.js";
-import { annotateRows } from "../node-test/annotate.js";
-import { buildEnvelope } from "../core/envelope.js";
-import { uniquifyRows } from "../core/id.js";
 import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
-import { deliver, type TransportDeps } from "../core/transport.js";
+import { shipRun } from "../core/ship-run.js";
+import type { TransportDeps } from "../core/transport.js";
 import type { ValidatorDeps } from "../core/validator.js";
 
 export { JestCollector } from "./collector.js";
@@ -174,27 +172,12 @@ export class SpecguardJestReporter {
         );
       }
 
-      // A run that reported zero tests has nothing to say — no POST, no file.
-      const rows = uniquifyRows(collector.getRows());
-      if (rows.length === 0) return;
-
-      // The annotation pass is shared with the node:test and Vitest
-      // adapters, unchanged: it never throws, never changes the exit code,
-      // and on any failure the unannotated rows ship as-is.
-      const annotated = annotateRows(rows, {
+      await shipRun(collector, {
+        env: this.env,
         repoRoot,
-        ...this.options.validator,
+        validator: this.options.validator,
+        transport: this.options.transport,
       });
-
-      const envelope = buildEnvelope(annotated.rows, this.env, collector.durationSeconds());
-      if (envelope === null) {
-        process.stderr.write(
-          "SpecGuard: no commit sha could be resolved (set SPECGUARD_COMMIT_SHA); telemetry not sent. The test run is unaffected.\n",
-        );
-        return;
-      }
-
-      await deliver(envelope, this.env, this.options.transport);
     } catch {
       // The never-fail guarantee: nothing here reaches the exit code.
       process.stderr.write(
