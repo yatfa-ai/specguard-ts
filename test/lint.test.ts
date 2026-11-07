@@ -2717,6 +2717,45 @@ test("SPGD-1188: help describes -v, --version and keeps the usage line", () => {
   assert.match(text, /-v, --version/);
 });
 
+test("SPGD-1345: top-level --help and -h put the whole message on stdout, nothing on stderr, exit 0", () => {
+  for (const flag of ["--help", "-h"]) {
+    const out = capture();
+    const err = capture();
+    const exit = runCli([flag], out.stream, err.stream);
+    assert.equal(exit, 0, flag);
+    assert.equal(
+      out.lines.join(""),
+      "Usage: specguard lint [--json] [--changed[=<base>]] [files...]\n\nCommands: lint\n",
+      flag,
+    );
+    assert.equal(err.lines.join(""), "", flag);
+  }
+});
+
+test("SPGD-1345: the no-argument misuse puts the whole message on stderr, nothing on stdout, exit 2", () => {
+  const out = capture();
+  const err = capture();
+  const exit = runCli([], out.stream, err.stream);
+  assert.equal(exit, 2);
+  assert.equal(
+    err.lines.join(""),
+    "Usage: specguard lint [--json] [--changed[=<base>]] [files...]\n\nCommands: lint\n",
+  );
+  assert.equal(out.lines.join(""), "");
+});
+
+test("SPGD-1345: an unknown command keeps its diagnostic and usage on stderr, stdout empty, exit 2", () => {
+  const out = capture();
+  const err = capture();
+  const exit = runCli(["bogus"], out.stream, err.stream);
+  assert.equal(exit, 2);
+  assert.equal(
+    err.lines.join(""),
+    "specguard: error: unknown command: bogus\nUsage: specguard lint [--json] [--changed[=<base>]] [files...]\n",
+  );
+  assert.equal(out.lines.join(""), "");
+});
+
 test("SPGD-1284: help's --changed block names the dependency/build directory fence and drops the false gitignore claim", () => {
   const out = capture();
   const err = capture();
