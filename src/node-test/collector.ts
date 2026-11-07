@@ -68,9 +68,14 @@ export class RunCollector {
   /** Rows dropped for a missing/invalid line or file — warned once at the end. */
   dropped = 0;
 
-  constructor(repoRoot: string, startedAtMs: number = Date.now()) {
+  /**
+   * `baseDir` is where a runner's cwd-relative file spelling resolves from —
+   * distinct from `repoRoot` (what row paths are made relative to) once the
+   * path root is the git toplevel rather than the cwd.
+   */
+  constructor(repoRoot: string, startedAtMs: number = Date.now(), baseDir: string = repoRoot) {
     this.repoRoot = repoRoot;
-    this.sourceMaps = new SourceMapResolver(repoRoot);
+    this.sourceMaps = new SourceMapResolver(repoRoot, baseDir);
     this.startedAtMs = startedAtMs;
   }
 

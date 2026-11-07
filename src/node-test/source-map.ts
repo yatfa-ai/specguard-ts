@@ -49,11 +49,13 @@ interface LoadedMap {
  */
 export class SourceMapResolver {
   private readonly repoRoot: string;
+  private readonly baseDir: string;
   /** One parsed map per compiled file; `null` caches "no usable map". */
   private readonly maps = new Map<string, LoadedMap | null>();
 
-  constructor(repoRoot: string) {
+  constructor(repoRoot: string, baseDir: string = repoRoot) {
     this.repoRoot = repoRoot;
+    this.baseDir = baseDir;
   }
 
   /**
@@ -104,7 +106,7 @@ export class SourceMapResolver {
 
   private load(file: string): LoadedMap | null {
     if (!COMPILED_EXTENSIONS.has(extname(file).toLowerCase())) return null;
-    const compiled = isAbsolute(file) ? file : resolve(this.repoRoot, file);
+    const compiled = isAbsolute(file) ? file : resolve(this.baseDir, file);
     const cached = this.maps.get(compiled);
     if (cached !== undefined) return cached;
     const loaded = this.read(compiled);

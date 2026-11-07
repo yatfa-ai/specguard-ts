@@ -6,6 +6,7 @@ import {
   withNativeShard,
   type RunnerEnv,
 } from "../core/env.js";
+import { resolveRunRoots, type RunRoots } from "../core/path-root.js";
 import { shipRun } from "../core/ship-run.js";
 import type { TransportDeps } from "../core/transport.js";
 
@@ -18,9 +19,12 @@ export interface ReporterOptions {
   /** Overrides the process environment (tests). */
   env?: RunnerEnv;
   /**
-   * Repo root for relativizing file paths (tests). Defaults to the cwd read
-   * ONCE at run start — the same value reaches both the collector and the
-   * annotation pass, so a mid-run chdir cannot split them.
+   * Root file paths are made relative to (tests). Defaults to the git
+   * toplevel of the cwd (the cwd itself when git cannot say), resolved ONCE
+   * at run start — the same value reaches both the collector and the
+   * annotation pass, so a mid-run chdir cannot split them. An explicit value
+   * also serves as the annotation walk root; by default the walk stays on
+   * the cwd subtree.
    */
   repoRoot?: string;
   /** Transport injection (tests). */
@@ -53,8 +57,9 @@ export async function* specguardReporter(
   // Reading the cwd again at finish time would let a mid-run chdir
   // relativize the rows against one root and key the annotation join against
   // another, silently shipping every annotated row as `unannotated`.
-  const repoRoot = options.repoRoot ?? process.cwd();
-  const collector = new RunCollector(repoRoot);
+  const roots = resolveRunRoots(options.repoRoot);
+  const repoRoot = roots.pathRoot;
+  const collector = new RunCollector(repoRoot, Date.now(), roots.walkRoot);
 
   for await (const ev of source) {
     try {
@@ -77,7 +82,7 @@ export async function* specguardReporter(
     yield "";
   }
 
-  await finish(collector, env, options, repoRoot);
+  await finish(collector, env, options, roots);
 }
 
 export default specguardReporter;
@@ -103,7 +108,7 @@ async function finish(
   collector: RunCollector,
   env: RunnerEnv,
   options: ReporterOptions,
-  repoRoot: string,
+  roots: RunRoots,
 ): Promise<void> {
   try {
     if (collector.dropped > 0) {
@@ -115,7 +120,12 @@ async function finish(
     // `repoRoot` is the value bound at run start, the same one the collector
     // relativized against, so discovery and the coordinate join share one
     // root. The shared pipeline does not catch; this guard's catch does.
-    await shipRun(collector, { env, repoRoot, transport: options.transport });
+    await shipRun(collector, {
+      env,
+      repoRoot: roots.pathRoot,
+      walkRoot: roots.walkRoot,
+      transport: options.transport,
+    });
   } catch {
     // The never-fail guarantee: nothing here reaches the exit code.
   }

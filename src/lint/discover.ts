@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { git, gitTopLevel, realPath } from "../core/git.js";
 
 /**
  * Discovery half of `specguard lint`: which source files are in scope, and
@@ -338,7 +338,7 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
   // double-count and needs no dedup.
   const diffLeg = diffNames(resolved.base, root, isShallow);
 
-  const top = topLevel(root);
+  const top = gitTopLevel(root);
   const topDir = top === "" ? root : top; // git could not say → the common case: root IS the top
   const names = changedNameUnion(diffLeg, untrackedLegNames(topDir));
 
@@ -406,45 +406,9 @@ function selectChanged(root: string, explicitBase: string | undefined): FileSele
   };
 }
 
-/** One git invocation, stderr captured (never inherited into our output),
- * every failure flattened to `ok: false` — each caller renders "git could
- * not answer" in its own vocabulary, exactly as the Ruby `git` helper does. */
-function git(args: string[], root: string): { out: string; ok: boolean } {
-  try {
-    return {
-      out: execFileSync("git", args, {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        maxBuffer: 16 * 1024 * 1024, // a name-only diff of a very large branch
-      }),
-      ok: true,
-    };
-  } catch {
-    return { out: "", ok: false };
-  }
-}
-
 function gitRepository(root: string): boolean {
   const run = git(["rev-parse", "--is-inside-work-tree"], root);
   return run.ok && run.out.trim() === "true";
-}
-
-/** The repository's top level — what `git diff`'s paths are relative to.
- * Empty when git cannot say; the caller falls back to root. */
-function topLevel(root: string): string {
-  const run = git(["rev-parse", "--show-toplevel"], root);
-  return run.ok ? realPath(run.out.trim()) : "";
-}
-
-/** Symlink-resolved, so a root reached through a symlink still compares equal
- * to the physical path git reports. */
-function realPath(p: string): string {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return path.resolve(p);
-  }
 }
 
 function isFile(p: string): boolean {

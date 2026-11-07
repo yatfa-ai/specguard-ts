@@ -145,7 +145,7 @@ Five things in the raw event stream would silently corrupt the payload, and the 
    N tests in M describes produces exactly N rows, and a failing nested test is reported once, not twice
    through its parent suite.
 2. **`duration_ms` is milliseconds; the wire field `duration` is seconds** — divided by 1000.
-3. **`file` is an absolute path** — relativized against the repo root (the process working directory).
+3. **`file` is an absolute path** — relativized against the repository root (the git toplevel of the working directory; the working directory itself when git is unavailable or it is not a repository). From a monorepo package, rows therefore ship as `packages/a/src/util.test.js`, so two packages' same-named files cannot collide. The `@intent:` annotation scan still walks only the working directory's subtree.
 4. **The event stream carries no ancestry, only a leaf name and a nesting integer** — the composed
    `describe > describe > test` name is reconstructed from a start/result stack (suites close in strict
    LIFO order, which is pinned by a test because it is an observed behaviour, not a documented guarantee).
@@ -560,7 +560,7 @@ The mapping decisions, each measured against a real `vitest run` (and pinned by
    [the reporter section](#how-an-annotation-is-attributed-to-a-test).
 2. **`diagnostic().duration` is milliseconds; the wire field `duration` is seconds** — divided by 1000.
    Skipped tests carry no diagnostic at all and ship `duration: null`.
-3. **`moduleId` is an absolute path** — relativized against the repo root (the process working directory),
+3. **`moduleId` is an absolute path** — relativized against the repository root (the git toplevel of the working directory; the working directory itself when git is unavailable),
    exactly as the `node:test` reporter relativizes `file`.
 4. **`fullName` is the composed name** — `"outer suite > inner suite > test"`, module path excluded, the
    same composition the `node:test` reporter reconstructs from its event stack. Vitest hands it over
@@ -642,8 +642,8 @@ The mapping decisions, each measured against a real `jest` run (and pinned by
 4. **`it.skip` surfaces as status `"pending"` and `it.todo` as `"todo"`** — the whole skip family
    (`pending`, `todo`, `skipped`, `disabled`) ships with outcome `"pending"`, never silently counted as a
    pass. `it.concurrent` surfaces as an ordinary result.
-5. **The suite's `testFilePath` is an absolute path** — relativized against the repo root (the process
-   working directory), exactly as the other two reporters relativize their file fields.
+5. **The suite's `testFilePath` is an absolute path** — relativized against the repository root (the git toplevel
+   of the working directory; the working directory itself when git is unavailable), exactly as the other two reporters relativize their file fields.
 6. **Suites produce no rows** — only tests do; a failing child is reported once, not again through its
    parent.
 7. **An unrecognized status is not a result** — its row is dropped and counted rather than shipped with a
@@ -789,7 +789,7 @@ them.
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `file_path` | string | **required**, non-empty; project-relative |
+| `file_path` | string | **required**, non-empty; relative to the repository root (git toplevel; the working directory when git is unavailable) |
 | `line_number` | integer | **required**, positive — taken from the event's `line`, always present on `node:test` result events |
 | `status` | `"annotated"` \| `"unannotated"` | `"annotated"` when a ratified `@intent:` is attributed to the test, otherwise `"unannotated"` |
 | `intent` | object \| null | **must be null** when unannotated |
@@ -877,6 +877,16 @@ specguard lint src/a.ts   # check named files
 specguard lint --changed  # check only what changed against the default branch
 specguard lint --json     # machine-readable report on stdout
 ```
+
+**Path spelling.** `specguard lint` names files relative to the current directory (as it always has);
+the reporters' telemetry `file_path` is relative to the repository root (git toplevel). Run from the repo
+root the two agree; from a monorepo package, a lint finding reads `src/util.test.js` while the row for the
+same file reads `packages/a/src/util.test.js`.
+
+> **Upgrade note.** Reporters used to relativize against the working directory. If you run tests from a
+> subdirectory of a git repository (an npm/pnpm workspace package, a CI `working-directory:`), `file_path`
+> gains the package prefix on the first run after upgrading, so per-directory growth for that one run is
+> discontinuous. Runs from the repo root or outside git are unchanged.
 
 `specguard --version` (also `-v`, and the same flag after `lint`) prints one
 line — `specguard-ts <version>`, the same version the HTTP client stamps into
