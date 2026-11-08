@@ -403,3 +403,203 @@ test("a crashed suite with no usable path is dropped and counted", () => {
   assert.equal(collector.getRows().length, 0);
   assert.equal(collector.dropped, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Compiled-TypeScript mapping (SPGD-2125): JestCollector resolves a suite run
+// from compiled output through the SAME SourceMapResolver the node:test
+// collector uses. The fixtures below hand-make a map exactly like
+// test/source-map.test.ts does, so every mapping arm is pinned at the
+// collector level without needing a real `tsc`.
+//
+// Map: generated line 2 → source line 8, generated line 3 → source line 9
+// (VLQ ";AAOA;AACA": line 0 empty; line 1 = [0,0,7,0]; line 2 = [0,0,1,0]).
+
+import fs from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
+
+const MAPPINGS = ";AAOA;AACA";
+
+const COMPILED = [
+  '"use strict";',
+  'it("alpha", () => { expect(1).toBe(1); });',
+  'it("beta", () => { expect(2).toBe(2); });',
+  "//# sourceMappingURL=a.test.js.map",
+  "",
+].join("\n");
+
+/** A `.ts` file whose body only exists so a mapped source names a real file. */
+const MAPPED_SOURCE = Array.from({ length: 12 }, (_, i) => `// source line ${i + 1}`).join("\n") + "\n";
+
+function mappedProject(): { root: string; compiled: string; source: string; cleanup: () => void } {
+  const root = fs.mkdtempSync(join(os.tmpdir(), "specguard-jest-sm-"));
+  fs.mkdirSync(join(root, "dist"), { recursive: true });
+  fs.mkdirSync(join(root, "src"), { recursive: true });
+  const compiled = join(root, "dist", "a.test.js");
+  fs.writeFileSync(compiled, COMPILED);
+  const source = join(root, "src", "a.test.ts");
+  fs.writeFileSync(source, MAPPED_SOURCE);
+  fs.writeFileSync(
+    join(root, "dist", "a.test.js.map"),
+    JSON.stringify({ version: 3, file: "a.test.js", sources: ["../src/a.test.ts"], names: [], mappings: MAPPINGS }),
+  );
+  return { root, compiled, source, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+test("a Jest-REPORTED location keeps the TS line and remaps only the file (never double-mapped)", () => {
+  const p = mappedProject();
+  try {
+    // With testLocationInResults Jest reports the source line itself (8);
+    // resolving it again would map (8, 5) to line 9 — the corruption this
+    // pin exists to catch.
+    const collector = collect([
+      { testFilePath: p.compiled, testResults: [jestAssertion({ title: "somewhere", location: { line: 8, column: 5 } })] },
+    ], p.root);
+    const row = collector.getRows()[0]!;
+    assert.equal(row.file_path, "src/a.test.ts");
+    assert.equal(row.line_number, 8);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a DERIVED line maps both the file and the line through the map", () => {
+  const p = mappedProject();
+  try {
+    // No location: the line comes from the compiled source ("alpha" sits on
+    // generated line 2), then maps to source line 8 under its source path.
+    const collector = collect([
+      { testFilePath: p.compiled, testResults: [jestAssertion({ title: "alpha", location: null })] },
+    ], p.root);
+    const row = collector.getRows()[0]!;
+    assert.equal(row.file_path, "src/a.test.ts");
+    assert.equal(row.line_number, 8);
+    assert.equal(collector.linesDerived, 1);
+    assert.equal(collector.linesFallback, 0);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a derived line that cannot map keeps the compiled path AND the compiled line", () => {
+  const p = mappedProject();
+  try {
+    // "beta" sits on generated line 3, whose map entry points at source line
+    // 9 — resolvable, so use a compiled file with NO map for the refusal arm.
+    const bare = join(p.root, "dist", "bare.test.js");
+    fs.writeFileSync(bare, 'it("gamma", () => {});\n');
+    const collector = collect([
+      { testFilePath: bare, testResults: [jestAssertion({ title: "gamma", location: null })] },
+    ], p.root);
+    const row = collector.getRows()[0]!;
+    assert.equal(row.file_path, "dist/bare.test.js");
+    assert.equal(row.line_number, 1);
+    assert.equal(collector.linesDerived, 1);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a derived line whose map entry is missing keeps the compiled line (never a compiled line under a source path)", () => {
+  const p = mappedProject();
+  try {
+    // The copied map's only mapping is on generated line 3, so the "tail"
+    // call on generated line 1 — BEFORE any mapping — has no entry for its
+    // position: resolve answers null and the row keeps BOTH compiled
+    // coordinates, the compiled path AND compiled line 1.
+    const tail = join(p.root, "dist", "tail.test.js");
+    fs.writeFileSync(
+      tail,
+      [
+        'it("tail", () => {});',
+        'it("filler", () => {});',
+        "//# sourceMappingURL=a.test.js.map",
+        "",
+      ].join("\n"),
+    );
+    fs.cpSync(join(p.root, "dist", "a.test.js.map"), join(p.root, "dist", "tail.test.js.map"));
+    const collector = collect([
+      { testFilePath: tail, testResults: [jestAssertion({ title: "tail", location: null })] },
+    ], p.root);
+    const row = collector.getRows()[0]!;
+    assert.equal(row.file_path, "dist/tail.test.js");
+    assert.equal(row.line_number, 1);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("the line-1 fallback is synthetic: its line stays 1, only the file is remapped", () => {
+  const p = mappedProject();
+  try {
+    const collector = collect([
+      { testFilePath: p.compiled, testResults: [jestAssertion({ title: "not in the compiled source", location: null })] },
+    ], p.root);
+    const row = collector.getRows()[0]!;
+    assert.equal(row.file_path, "src/a.test.ts");
+    assert.equal(row.line_number, 1);
+    assert.equal(collector.linesFallback, 1);
+    assert.equal(collector.linesDerived, 0);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a `.ts` testFilePath (ts-jest / babel-jest shape) ships byte-identical rows", () => {
+  const p = mappedProject();
+  try {
+    // The extension guard: a `.ts` suite is never looked at for a map —
+    // reported lines and derived lines alike ship exactly as they arrived.
+    const tsPath = join(p.root, "src", "c.test.ts");
+    fs.writeFileSync(tsPath, 'it("epsilon", () => {});\nit("zeta", () => {});\n');
+    const collector = collect([
+      {
+        testFilePath: tsPath,
+        testResults: [
+          jestAssertion({ title: "epsilon", location: null }),
+          jestAssertion({ title: "zeta", location: { line: 2, column: 1 } }),
+        ],
+      },
+    ], p.root);
+    const [epsilon, zeta] = collector.getRows();
+    assert.equal(epsilon!.file_path, "src/c.test.ts");
+    assert.equal(epsilon!.line_number, 1);
+    assert.equal(zeta!.file_path, "src/c.test.ts");
+    assert.equal(zeta!.line_number, 2);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a crashed compiled suite's file-failure row is named by its source path", () => {
+  const p = mappedProject();
+  try {
+    const collector = new JestCollector(p.root, 1_000);
+    collector.onRunComplete({
+      testResults: [{ testFilePath: p.compiled, testResults: [], testExecError: new Error("boom") }],
+    });
+    const row = collector.getRows()[0]!;
+    assert.equal(row.name, "src/a.test.ts > (test file failed to run)");
+    assert.equal(row.file_path, "src/a.test.ts");
+    assert.equal(row.line_number, 1);
+    assert.equal(row.outcome, "failed");
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("a crashed compiled suite with no usable map is named by its compiled path", () => {
+  const p = mappedProject();
+  try {
+    fs.rmSync(join(p.root, "dist", "a.test.js.map"));
+    const collector = new JestCollector(p.root, 1_000);
+    collector.onRunComplete({
+      testResults: [{ testFilePath: p.compiled, testResults: [], testExecError: new Error("boom") }],
+    });
+    const row = collector.getRows()[0]!;
+    assert.equal(row.name, "dist/a.test.js > (test file failed to run)");
+    assert.equal(row.file_path, "dist/a.test.js");
+  } finally {
+    p.cleanup();
+  }
+});

@@ -18,6 +18,11 @@
  * A caller that gets `null` falls back to line `1` (the convention
  * `fileFailedRow` already uses) rather than dropping the row. Nothing here
  * throws.
+ *
+ * The column of the call is scanned too (`takePosition`): a suite run from
+ * COMPILED output (`tsc` → `jest dist/`) has its derived position mapped
+ * back to the TypeScript source, and a source-map lookup wants the column
+ * of the call, not just its line. `take` keeps the line-only shape.
  */
 
 /** Identifier (+ optional `.only`/`.skip`/`.concurrent`… chain) then `(` and the first argument's opening quote. */
@@ -29,6 +34,8 @@ const NON_LITERAL_MODIFIERS = new Set(["each"]);
 interface Occurrence {
   title: string;
   line: number;
+  /** 1-based column of the call identifier — the anchor a source map wants. */
+  column: number;
 }
 
 /** Read one string literal starting just AFTER its opening quote; null when unterminated or interpolated. */
@@ -68,7 +75,7 @@ export function scanTestCalls(source: string): Occurrence[] {
     if (source.slice(lineStart, m.index).includes("//")) continue; // commented out
     const title = readLiteral(source, m.index + m[0].length, m[2]!);
     if (title === null) continue;
-    found.push({ title, line });
+    found.push({ title, line, column: m.index - lineStart + 1 });
   }
   return found;
 }
@@ -79,25 +86,30 @@ export function scanTestCalls(source: string): Occurrence[] {
  * text (`null` text = unreadable file, every lookup yields `null`).
  */
 export class SourceLineIndex {
-  private readonly byTitle = new Map<string, number[]>();
+  private readonly byTitle = new Map<string, Occurrence[]>();
 
   constructor(source: string | null) {
     if (source === null) return;
     try {
-      for (const { title, line } of scanTestCalls(source)) {
-        const lines = this.byTitle.get(title);
-        if (lines === undefined) this.byTitle.set(title, [line]);
-        else lines.push(line);
+      for (const occurrence of scanTestCalls(source)) {
+        const lines = this.byTitle.get(occurrence.title);
+        if (lines === undefined) this.byTitle.set(occurrence.title, [occurrence]);
+        else lines.push(occurrence);
       }
     } catch {
       this.byTitle.clear(); // a scan failure derives nothing; every row falls back
     }
   }
 
-  /** The next unconsumed line for `title`, or null when none remains. */
-  take(title: string): number | null {
+  /** The next unconsumed occurrence for `title` (line AND column), or null. */
+  takePosition(title: string): Occurrence | null {
     const lines = this.byTitle.get(title);
     if (lines === undefined || lines.length === 0) return null;
     return lines.shift() ?? null;
+  }
+
+  /** The next unconsumed line for `title`, or null when none remains. */
+  take(title: string): number | null {
+    return this.takePosition(title)?.line ?? null;
   }
 }

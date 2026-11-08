@@ -6,6 +6,7 @@ import { exampleId } from "../core/id.js";
 import { fileFailedRow } from "../core/file-failed.js";
 import { msToSeconds } from "../core/duration.js";
 import { SourceLineIndex } from "./source-lines.js";
+import { SourceMapResolver } from "../node-test/source-map.js";
 
 /**
  * Structural types for the Jest 30 reporter API this collector reads —
@@ -103,6 +104,14 @@ export class JestCollector {
   private readonly startedAtMs: number;
   private readonly repoRoot: string;
   private readonly readSource: (path: string) => string;
+  /**
+   * Maps suites run from COMPILED output (`tsc` → `jest dist/`) back to the
+   * TypeScript source their `@intent` annotations live in — the same
+   * self-constructed resolver the node:test collector uses. A `.ts`
+   * `testFilePath` (ts-jest, babel-jest) is never touched, and every
+   * mapping failure keeps the compiled coordinates.
+   */
+  private readonly sourceMaps: SourceMapResolver;
   /** Rows dropped for an invalid line, name, or outcome — warned once at the end. */
   dropped = 0;
   /** Rows with no Jest `location` whose line was found in the suite's source. */
@@ -119,6 +128,7 @@ export class JestCollector {
     this.repoRoot = repoRoot;
     this.startedAtMs = startedAtMs;
     this.readSource = readSource;
+    this.sourceMaps = new SourceMapResolver(repoRoot);
   }
 
   /** Consume one `onRunComplete` aggregated result. Never throws. */
@@ -155,9 +165,15 @@ export class JestCollector {
         index ??= this.buildIndex(filePathRaw);
         return index;
       };
+      // The suite's TypeScript source (absolute), looked up at most once.
+      let sourceFile: string | null | undefined;
+      const mappedFile = (): string | null => {
+        if (sourceFile === undefined) sourceFile = this.mapFile(filePathRaw);
+        return sourceFile;
+      };
       for (const assertion of assertions) {
         try {
-          this.add(filePathRaw, assertion, lineIndex);
+          this.add(filePathRaw, assertion, lineIndex, mappedFile);
         } catch {
           this.dropped += 1;
         }
@@ -179,7 +195,8 @@ export class JestCollector {
     }
     // Jest reports no per-file duration for a suite that never ran
     // (`perfStats` is all zeros), so none is fabricated.
-    this.rows.push(fileFailedRow(this.relativize(filePathRaw), null));
+    const source = this.mapFile(filePathRaw);
+    this.rows.push(fileFailedRow(this.relativize(source === null ? filePathRaw : source), null));
   }
 
   getRows(): readonly SpecRow[] {
@@ -201,7 +218,22 @@ export class JestCollector {
     }
   }
 
-  private add(filePathRaw: unknown, assertion: unknown, lineIndex: () => SourceLineIndex): void {
+  /** The TypeScript source a compiled suite file came from, or null. Never throws. */
+  private mapFile(filePathRaw: unknown): string | null {
+    try {
+      if (typeof filePathRaw !== "string" || filePathRaw === "") return null;
+      return this.sourceMaps.resolveFile(filePathRaw);
+    } catch {
+      return null;
+    }
+  }
+
+  private add(
+    filePathRaw: unknown,
+    assertion: unknown,
+    lineIndex: () => SourceLineIndex,
+    mappedFile: () => string | null,
+  ): void {
     const file = typeof filePathRaw === "string" ? filePathRaw : undefined;
     const test = assertion as JestAssertionResult | null | undefined;
 
@@ -246,15 +278,31 @@ export class JestCollector {
     // falling back to line 1 (the `fileFailedRow` convention) when the call
     // cannot be found. A location Jest DID report but that is not a positive
     // integer is malformed, not absent: that row is dropped and counted.
+    //
+    // Source maps (compiled `tsc` output): a Jest-REPORTED line is already the
+    // TypeScript line (Jest source-maps reported locations while leaving the
+    // file path compiled), so only the FILE is remapped. A DERIVED line is a
+    // compiled coordinate and is mapped, with its file, through the map; if it
+    // cannot map, the row keeps the compiled path AND line (never a compiled
+    // line under a source path). The line-1 fallback is synthetic and is never
+    // mapped; only its file is.
     const location = test?.location;
     let line: number;
+    let rowFile = mappedFile() ?? file;
     if (location === null || location === undefined) {
-      const derived = lineIndex().take(title);
+      const derived = lineIndex().takePosition(title);
       if (derived === null) {
         line = 1;
         this.linesFallback += 1;
       } else {
-        line = derived;
+        const mapped = this.mapPosition(file, derived.line, derived.column);
+        if (mapped === null) {
+          line = derived.line;
+          rowFile = file;
+        } else {
+          rowFile = mapped.file;
+          line = mapped.line;
+        }
         this.linesDerived += 1;
       }
     } else {
@@ -273,7 +321,7 @@ export class JestCollector {
     const outcome =
       status === "failed" ? "failed" : status === "passed" ? "passed" : "pending";
 
-    const filePath = this.relativize(file);
+    const filePath = this.relativize(rowFile);
     this.rows.push({
       file_path: filePath,
       line_number: line,
@@ -284,6 +332,19 @@ export class JestCollector {
       id: exampleId(filePath, name),
       outcome,
     });
+  }
+
+  /** A compiled `(file, line)` mapped to its source position, or null. Never throws. */
+  private mapPosition(
+    file: string,
+    line: number,
+    column?: number,
+  ): { file: string; line: number } | null {
+    try {
+      return this.sourceMaps.resolve(file, line, column);
+    } catch {
+      return null;
+    }
   }
 
   private relativize(file: string): string {

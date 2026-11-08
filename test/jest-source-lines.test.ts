@@ -64,3 +64,9 @@ test("SourceLineIndex.take hands out successive lines for a repeated title, then
   assert.equal(index.take("dup"), null);
   assert.equal(index.take("never written"), null);
 });
+
+test("SourceLineIndex.takePosition hands out the 1-based call column beside the line", () => {
+  const index = new SourceLineIndex(['describe("d", () => {', '  it("inner", () => {});', "});"].join("\n"));
+  assert.deepEqual(index.takePosition("inner"), { title: "inner", line: 2, column: 3 });
+  assert.equal(index.takePosition("absent"), null);
+});
