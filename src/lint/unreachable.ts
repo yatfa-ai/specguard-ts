@@ -136,7 +136,7 @@ const EXAMPLE_CALL_SOURCE =
  * call vocabulary is EXAMPLE_CALL_SOURCE's rule (runner modifiers, `.each`
  * tables, `.skipIf(c)` conditionals, `xit`/`fit` aliases).
  */
-const EXAMPLE_LINE = new RegExp(`^\\s*${EXAMPLE_CALL_SOURCE}`);
+export const EXAMPLE_LINE = new RegExp(`^\\s*${EXAMPLE_CALL_SOURCE}`);
 
 /** Why a stacked line fails: the lookback claims only the line directly
  * above the example, so this one is discarded at extraction. The remedy is

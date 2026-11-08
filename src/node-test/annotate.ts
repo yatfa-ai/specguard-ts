@@ -5,6 +5,7 @@ import type { SpecRow } from "../core/types.js";
 import { resolveValidator, type ValidatorDeps } from "../core/validator.js";
 import { LintBackendError, checkWithBackend, type ValidatorFinding } from "../lint/backend.js";
 import { scanTokens, selectFiles, unscannableClause } from "../lint/discover.js";
+import { exampleOpenerLine } from "./example-opener.js";
 
 /**
  * Slice 4: carry validator-ratified intent on telemetry.
@@ -19,7 +20,10 @@ import { scanTokens, selectFiles, unscannableClause } from "../lint/discover.js"
  * The (file, line) coordinate discipline: an annotation is a single comment
  * line immediately above the test — OR ON THE SAME LINE AS IT (OpenTestIntent
  * PROTOCOL.md §1; `specguard lint` accepts both forms, so telemetry must map
- * both). For `node:test`, the reporter event's `data.line` points at the
+ * both). SPGD-2117: when neither arm matches at the reported line, the pass
+ * resolves the line the test's example call OPENS on (a multi-line `it.each`
+ * table is reported at its second call's line, not its opener) and applies
+ * the same two arms there — see `example-opener.ts`. For `node:test`, the reporter event's `data.line` points at the
  * `test(...)` call line, and the preceding-comment form puts the annotation
  * one line ABOVE — measured on a real fixture (pinned in
  * test/annotate.test.ts). A finding therefore matches a row on the row's OWN
@@ -304,6 +308,19 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     // the text existed moments ago), and each file is read at most once per
     // pass.
     const fileLines = new Map<string, string[] | null>();
+    const sourceLinesOf = (fileKey: string): string[] | null => {
+      let lines = fileLines.get(fileKey);
+      if (lines === undefined) {
+        try {
+          const readPath = isAbsolute(fileKey) ? fileKey : join(repoRoot, fileKey);
+          lines = fs.readFileSync(readPath, "utf8").split("\n");
+        } catch {
+          lines = null;
+        }
+        fileLines.set(fileKey, lines);
+      }
+      return lines;
+    };
     // Three answers, and only one of them vetoes. `true` — the line is
     // comment-only: the fallback arm may claim it. `false` — definitively
     // not inheritable: either the line's text is in hand and is not a
@@ -320,21 +337,36 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
     // left as unreadable to this re-read carries no passing finding to
     // inherit — and it never throws and never degrades the pass.
     const commentOnlyAt = (fileKey: string, line: number): boolean | null => {
-      let lines = fileLines.get(fileKey);
-      if (lines === undefined) {
-        try {
-          const readPath = isAbsolute(fileKey) ? fileKey : join(repoRoot, fileKey);
-          lines = fs.readFileSync(readPath, "utf8").split("\n");
-        } catch {
-          lines = null;
-        }
-        fileLines.set(fileKey, lines);
-      }
+      const lines = sourceLinesOf(fileKey);
       if (lines === null) return scanned.has(fileKey) ? false : null;
       const sourceLine = lines[line - 1];
       return sourceLine !== undefined && COMMENT_ONLY_LINE.test(sourceLine);
     };
-    const out = rows.map((row) => {
+    // The two arms, applied at one coordinate (the row's reported line, or —
+    // for the second pass below — the line its example call OPENS on).
+    // Returns the claimed finding's coordinate, or null when neither arm
+    // fires. ARM 1 is the OWN line (PROTOCOL.md §1's same-line form: a
+    // trailing `// @intent:` ON the call line) — a finding there is the
+    // intent whatever sits above it, Ruby `own[line]` over
+    // `inheritable[line - 1]`. ARM 2 is the preceding-comment form: the
+    // annotation sits LOOKBACK_LINES above the call, claimable only when
+    // that source line is COMMENT-ONLY (a trailing annotation on another
+    // test's line belongs to THAT test's own-line arm, never this one).
+    const claimAt = (fileKey: string, line: number): string | null => {
+      const ownKey = `${fileKey}:${line}`;
+      if (byCoordinate.has(ownKey)) return ownKey;
+      const annotationLine = line - ANNOTATION_LOOKBACK_LINES;
+      if (annotationLine <= 0) return null;
+      const key = `${fileKey}:${annotationLine}`;
+      if (!byCoordinate.has(key)) return null;
+      if (commentOnlyAt(fileKey, annotationLine) === false) return null;
+      return key;
+    };
+    // Which row line claimed each coordinate in the first pass (the pass
+    // keyed on the REPORTED line). The opener pass below may not re-claim a
+    // coordinate another example call already holds.
+    const claimedBy = new Map<string, number>();
+    const out: SpecRow[] = rows.map((row) => {
       // Ruby Index parity: line 0 is never a coordinate (FIRST_REAL_LINE).
       if (row.line_number < 1) return row;
       // SPGD-1011: the row legs key through the SAME normalization as the
@@ -347,24 +379,38 @@ export function annotateRows(rows: readonly SpecRow[], deps: AnnotateDeps = {}):
       // the shared normalizer also folds a leading `./`, so a
       // `./`-spelled collector echo joins the same canonical key.
       const fileKey = normalizeRepoPath(row.file_path, repoRoot);
-      // ARM 1 — the row's OWN line (PROTOCOL.md §1's same-line form: a
-      // trailing `// @intent:` ON the call line). A finding here is the
-      // row's intent whatever sits above it — Ruby `own[line]` wins over
-      // `inheritable[line - 1]`.
-      const ownKey = `${fileKey}:${row.line_number}`;
-      if (byCoordinate.has(ownKey)) return flip(row, byCoordinate.get(ownKey) ?? null);
-      // ARM 2 — the preceding-comment form: the annotation comment sits
-      // LOOKBACK_LINES above the `test(...)` call.
-      const annotationLine = row.line_number - ANNOTATION_LOOKBACK_LINES;
-      if (annotationLine <= 0) return row;
-      const key = `${fileKey}:${annotationLine}`;
-      if (!byCoordinate.has(key)) return row;
-      // The line above is claimable only when it is a COMMENT-ONLY line: a
-      // trailing annotation on another test's line belongs to THAT test's
-      // own-line arm (which already ran for it above), never to this row.
-      if (commentOnlyAt(fileKey, annotationLine) === false) return row;
-      return flip(row, byCoordinate.get(key) ?? null);
+      const claimed = claimAt(fileKey, row.line_number);
+      if (claimed === null) return row;
+      claimedBy.set(claimed, row.line_number);
+      return flip(row, byCoordinate.get(claimed) ?? null);
     });
+    // SPGD-2117: Vitest and Jest report a multi-line `it.each([...])("t", fn)`
+    // / ``it.each`...`("t", fn)`` at the line of the SECOND call, so the
+    // annotation above the line `it.each` OPENS on is out of both arms'
+    // reach. For a row still unannotated, resolve the opener of the example
+    // call its reported line sits inside and apply the SAME two arms there.
+    // Rows of one table share a reported line, hence one opener and one
+    // annotation; a coordinate another example call already claimed is never
+    // taken. Any failure leaves the row as the first pass left it.
+    for (let index = 0; index < out.length; index += 1) {
+      const row = out[index]!;
+      if (row.status === "annotated" || row.line_number < 2) continue;
+      try {
+        const fileKey = normalizeRepoPath(row.file_path, repoRoot);
+        const lines = sourceLinesOf(fileKey);
+        if (lines === null) continue;
+        const opener = exampleOpenerLine(lines, row.line_number);
+        if (opener === null) continue;
+        const claimed = claimAt(fileKey, opener);
+        if (claimed === null) continue;
+        const holder = claimedBy.get(claimed);
+        if (holder !== undefined && holder !== row.line_number) continue;
+        claimedBy.set(claimed, row.line_number);
+        out[index] = flip(row, byCoordinate.get(claimed) ?? null);
+      } catch {
+        // Never-fail: fall through to the first pass's answer.
+      }
+    }
     // SPGD-971, narrowed by SPGD-1006: degraded when at least one file was
     // looked at by NO reader — unreadable discovery-side, or read-failed
     // backend-side. An oversize-only pass does NOT degrade: the backend read

@@ -198,6 +198,19 @@ lookup is ordered — the first arm that matches claims the annotation:
 2. **Otherwise a comment-only `// @intent:` line directly above the call line** — the preceding-comment
    form. A trailing annotation on *another* test's line is never inherited by the row below it.
 
+**Multi-line `it.each` / `test.each`.** Vitest and Jest report the tests a parameterised table
+generates at a line that is not the line `it.each` opens on — a multi-line array table at its closing
+`])("title", fn)` line (Vitest 4; Jest reports both forms at their closing call), a tagged-template
+table at `` `("title", fn) `` in Vitest 4. When neither arm above matches, the pass resolves the line
+the example call *opens* on (the nearest preceding `it`/`test`/`specify`/`fit`/`xit`/`xtest` head —
+the same recognition rule `specguard lint` uses, modifiers and `.each` tables included) whose
+statement reaches the reported line, and applies the same two arms there. So an `@intent:` above a
+multi-line `.each` opener — preceding-comment or trailing on the opener line — annotates every row
+the table generates. Adjacent tables keep their own annotations: an annotation is never claimed by
+two different tests, and a table with no annotation stays `unannotated` even directly after an
+annotated one. If the opener cannot be resolved (unbalanced source, no covering head), the row falls
+through to the behaviour above — the pass never throws.
+
 An annotation the `validate-intent` binary rejects, or one that cannot be attributed to any test, ships
 `status: "unannotated"` and never fails the run. So does a test with no annotation at all — a run with
 zero annotations is valid by construction. Both arms apply to every adapter below.
