@@ -981,3 +981,155 @@ test("SPGD-1519: the line-above fallback never claims a non-comment line — a r
   assert.equal(out.rows[0]!.status, "unannotated");
   assert.equal(out.rows[0]!.intent, null);
 });
+
+// ---------------------------------------------------------------------------
+// SPGD-2117: an @intent above a multi-line `.each` opener attributes to the
+// rows Vitest / Jest report at the SECOND call's line.
+// ---------------------------------------------------------------------------
+
+const EACH_SRC = [
+  "import { it } from 'vitest';", //                              1
+  "", //                                                          2
+  '// @intent: {"a":1}', //                                       3 — array table A
+  "it.each([", //                                                 4
+  "  [1, 2],", //                                                 5
+  "  [3, 4],", //                                                 6
+  '])("array %i", (a, b) => {', //                                7 — reported line
+  "  void [a, b];", //                                            8
+  "});", //                                                       9
+  "", //                                                          10
+  '// @intent: {"b":2}', //                                       11 — tagged table B
+  "it.each`", //                                                  12
+  "  a    | b", //                                                13
+  "  ${1} | ${2}", //                                             14
+  '`("tagged $a", ({ a, b }) => {', //                            15 — reported line
+  "  void [a, b];", //                                            16
+  "});", //                                                       17
+  "it.each([", //                                                 18 — unannotated table C, directly after B
+  "  [5, 6],", //                                                 19
+  '])("bare %i", (a, b) => {', //                                 20 — reported line
+  "  void [a, b];", //                                            21
+  "});", //                                                       22
+  "it.each([ // @intent: {\"d\":4}", //                           23 — trailing annotation on the opener
+  "  [7, 8],", //                                                 24
+  '])("trailing %i", (a, b) => {', //                             25 — reported line
+  "  void [a, b];", //                                            26
+  "});", //                                                       27
+].join("\n");
+
+function eachFixture(): { root: string; binary: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-each-"));
+  fs.writeFileSync(path.join(root, "each.test.ts"), EACH_SRC);
+  const f = (line: number, intent: Record<string, unknown>) => ({
+    file: "each.test.ts",
+    line,
+    kind: null,
+    ok: true,
+    errors: [],
+    intent,
+  });
+  const binary = stubBackend([f(3, { a: 1 }), f(11, { b: 2 }), f(23, { d: 4 })], 3);
+  return { root, binary };
+}
+
+function runEach(rowsIn: SpecRow[], fx: { root: string; binary: string }) {
+  const warnings: string[] = [];
+  const out = annotateRows(rowsIn, {
+    repoRoot: fx.root,
+    env: { [VALIDATE_INTENT_ENV_VAR]: fx.binary },
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(warnings, []);
+  return out;
+}
+
+test("SPGD-2117: rows reported on the closing line of a multi-line array `it.each` take the annotation above its opener", () => {
+  const out = runEach([row("each.test.ts", 7, "array 1"), row("each.test.ts", 7, "array 3")], eachFixture());
+  assert.equal(out.annotated, 2);
+  for (const r of out.rows) {
+    assert.equal(r.status, "annotated");
+    assert.deepEqual(r.intent, { a: 1 });
+  }
+  // Only attribution moves — never the coordinate or the id.
+  assert.equal(out.rows[0]!.line_number, 7);
+  assert.equal(out.rows[0]!.id, "each.test.ts:7");
+});
+
+test("SPGD-2117: rows reported on the closing line of a tagged-template `it.each` take the annotation above its opener", () => {
+  const out = runEach([row("each.test.ts", 15, "tagged 1")], eachFixture());
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, { b: 2 });
+});
+
+test("SPGD-2117: a trailing annotation on the opener line attributes to the table's rows", () => {
+  const out = runEach([row("each.test.ts", 25, "trailing 7")], eachFixture());
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, { d: 4 });
+});
+
+test("SPGD-2117: adjacent tables attribute independently — an unannotated table after an annotated one stays unannotated", () => {
+  const out = runEach(
+    [
+      row("each.test.ts", 7, "array 1"),
+      row("each.test.ts", 15, "tagged 1"),
+      row("each.test.ts", 20, "bare 5"),
+      row("each.test.ts", 25, "trailing 7"),
+    ],
+    eachFixture(),
+  );
+  assert.deepEqual(
+    out.rows.map((r) => [r.status, r.intent]),
+    [
+      ["annotated", { a: 1 }],
+      ["annotated", { b: 2 }],
+      ["unannotated", null],
+      ["annotated", { d: 4 }],
+    ],
+  );
+  assert.equal(out.annotated, 3);
+});
+
+test("SPGD-2117: a coordinate another example call already claimed is never re-claimed through the opener walk", () => {
+  // The first pass gives the row reported at line 4 (the opener) the
+  // annotation at line 3. A row reported at the closing line 7 resolves to
+  // the same opener but is a DIFFERENT call site's row, so it is refused.
+  const out = runEach([row("each.test.ts", 4, "opener row"), row("each.test.ts", 7, "closing row")], eachFixture());
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.equal(out.rows[1]!.status, "unannotated");
+});
+
+test("SPGD-2117: single-line forms and plain `it(...)` rows keep their pre-existing attribution", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-each-"));
+  fs.writeFileSync(
+    path.join(root, "one.test.ts"),
+    ['// @intent: {"s":1}', 'it.each([[1, 2, 3]])("lit", () => {});', 'it("plain", () => {});', ""].join("\n"),
+  );
+  const binary = stubBackend(
+    [{ file: "one.test.ts", line: 1, kind: null, ok: true, errors: [], intent: { s: 1 } }],
+    1,
+  );
+  const out = runEach([row("one.test.ts", 2, "lit"), row("one.test.ts", 3, "plain")], { root, binary });
+  assert.equal(out.rows[0]!.status, "annotated");
+  assert.deepEqual(out.rows[0]!.intent, { s: 1 });
+  assert.equal(out.rows[1]!.status, "unannotated");
+});
+
+test("SPGD-2117: fall-through — unbalanced source, a vanished file and a line past EOF never throw and change nothing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "specguard-each-"));
+  fs.writeFileSync(
+    path.join(root, "broken.test.ts"),
+    ['// @intent: {"x":1}', "it.each([", "  [1, 2],", "  ]]", '])("never closes", () => {', ""].join("\n"),
+  );
+  const binary = stubBackend(
+    [{ file: "broken.test.ts", line: 1, kind: null, ok: true, errors: [], intent: { x: 1 } }],
+    1,
+  );
+  const input = [
+    row("broken.test.ts", 5, "unbalanced"),
+    row("broken.test.ts", 999, "past eof"),
+    row("gone.test.ts", 5, "no such file"),
+  ];
+  const out = runEach(input, { root, binary });
+  assert.deepEqual(out.rows, input);
+  assert.equal(out.annotated, 0);
+});

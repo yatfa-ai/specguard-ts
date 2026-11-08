@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import type { Envelope, SpecRow } from "../src/core/types.js";
 import { SCHEMA_CONTRACT_DIGEST } from "../src/core/validator.js";
+import { exampleId } from "../src/core/id.js";
 import { version } from "../src/core/transport.js";
 
 const execFileAsync = promisify(execFile);
@@ -675,6 +676,135 @@ test("end to end: a Jest file that crashes at load ships ONE failed row beside t
     const survivors = specs.filter((s) => s.file_path !== "fixtures/jest/crash.test.js");
     assert.equal(survivors.length, 6, JSON.stringify(survivors.map((s) => s.name)));
     assert.equal(survivors.filter((s) => s.outcome === "failed").length, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SPGD-2117: an @intent above a multi-line `it.each` attributes to every row
+// Jest reports at the closing call's line.
+// ---------------------------------------------------------------------------
+
+/** 1-based line of the first line CONTAINING `needle` in a fixture — for
+ * annotations written mid-line (the trailing-on-the-opener form). */
+function fixtureLineContaining(fixture: string, needle: string): number {
+  const lines = readFileSync(join(fixturesDir, fixture), "utf8").split("\n");
+  const i = lines.findIndex((l) => l.includes(needle));
+  if (i < 0) throw new Error(`fixture lost: ${fixture}: ${needle}`);
+  return i + 1;
+}
+
+/** A stub `validate-intent` binary ratifying the multi-line-each fixture's
+ * three annotations, keyed at the COMMENT lines. */
+async function eachStubBackend(): Promise<string> {
+  const doc = JSON.stringify({
+    mode: "source",
+    findings: [
+      {
+        file: "fixtures/jest/multiline-each.test.js",
+        line: fixtureLineOf("multiline-each.test.js", '// @intent: {"entity":"Cart","action":"price lines","behavior":"prices every array-form row'),
+        kind: null,
+        ok: true,
+        errors: [],
+        intent: {
+          entity: "Cart",
+          action: "price lines",
+          behavior: "prices every array-form row",
+          layer: "unit",
+        },
+      },
+      {
+        file: "fixtures/jest/multiline-each.test.js",
+        line: fixtureLineOf("multiline-each.test.js", '// @intent: {"entity":"Cart","action":"price lines","behavior":"prices every tagged-template row'),
+        kind: null,
+        ok: true,
+        errors: [],
+        intent: {
+          entity: "Cart",
+          action: "price lines",
+          behavior: "prices every tagged-template row",
+          layer: "unit",
+        },
+      },
+      {
+        file: "fixtures/jest/multiline-each.test.js",
+        line: fixtureLineContaining("multiline-each.test.js", '// @intent: {"entity":"Cart","action":"price lines","behavior":"prices a trailing-annotated opener'),
+        kind: null,
+        ok: true,
+        errors: [],
+        intent: {
+          entity: "Cart",
+          action: "price lines",
+          behavior: "prices a trailing-annotated opener",
+          layer: "unit",
+        },
+      },
+    ],
+    summary: { annotations: 3 },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "specguard-validator-"));
+  const file = join(dir, "validate-intent");
+  writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      "case \"$1\" in",
+      `  --version) printf '%s\\n' 'validate-intent stub (jest each) schema sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      `  --schema-source) printf '%s\\n' 'schema <embedded schema> sha256:${SCHEMA_CONTRACT_DIGEST}'; exit 0 ;;`,
+      "esac",
+      "if [ \"$1\" = \"--source\" ]; then",
+      `  printf '%s\\n' '${doc.replace(/'/g, `'\\''`)}'`,
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  return file;
+}
+
+test("end to end: SPGD-2117 — an @intent above a multi-line `it.each` annotates every generated row (array + tagged, trailing on the opener, no stealing)", async (t) => {
+  if (jestBin === null) return t.skip("jest not installed — adapter e2e skipped (optional peer)");
+  const stub = await eachStubBackend();
+  const srv = await captureServer();
+  try {
+    const result = await runJest("multiline-each.config.mjs", srv.url, {
+      SPECGUARD_VALIDATE_INTENT: stub,
+    });
+    assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+    assert.equal(srv.captured.length, 1);
+    const specs = srv.captured[0]!.body.specs;
+    assert.equal(specs.length, 6, JSON.stringify(specs.map((s) => s.name)));
+    const byName = new Map(specs.map((s) => [s.name, s]));
+    const arrayIntent = { entity: "Cart", action: "price lines", behavior: "prices every array-form row", layer: "unit" };
+    const taggedIntent = { entity: "Cart", action: "price lines", behavior: "prices every tagged-template row", layer: "unit" };
+    const trailingIntent = { entity: "Cart", action: "price lines", behavior: "prices a trailing-annotated opener", layer: "unit" };
+    for (const name of ["array form 1", "array form 3"]) {
+      const r = byName.get(name)!;
+      assert.equal(r.status, "annotated", name);
+      assert.deepEqual(r.intent, arrayIntent, name);
+    }
+    for (const name of ["tagged form 1", "tagged form 3"]) {
+      const r = byName.get(name)!;
+      assert.equal(r.status, "annotated", name);
+      assert.deepEqual(r.intent, taggedIntent, name);
+    }
+    const trailing = byName.get("trailing form 5")!;
+    assert.equal(trailing.status, "annotated");
+    assert.deepEqual(trailing.intent, trailingIntent);
+    // The table directly after the annotated tagged one carries nothing.
+    const bare = byName.get("unannotated after annotated 7")!;
+    assert.equal(bare.status, "unannotated");
+    assert.equal(bare.intent, null);
+    // Coordinates and ids are untouched — only attribution moved.
+    const arrayRows = specs.filter((s) => s.name.startsWith("array form"));
+    for (const r of arrayRows) {
+      assert.equal(r.line_number, fixtureLineOf("multiline-each.test.js", '])("array form %i"'));
+      // The upsert id is the stable (file_path, composed name) hash — the
+      // attribution pass must not have re-identified or re-lined it.
+      assert.equal(r.id, exampleId(r.file_path, r.name));
+    }
   } finally {
     await srv.close();
   }
