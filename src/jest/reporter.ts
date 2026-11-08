@@ -162,8 +162,8 @@ export class SpecguardJestReporter {
             : "";
         process.stderr.write(
           this.locationInResults
-            ? `SpecGuard: Jest reported no location for ${derived} test result(s) despite \`testLocationInResults\`; their line numbers were derived from the test source${fallback}. The test run is unaffected.\n`
-            : `SpecGuard: \`testLocationInResults\` is off, so line numbers for ${derived} test result(s) were derived from the test source${fallback}; set \`testLocationInResults: true\` in the Jest config for exact lines. The test run is unaffected.\n`,
+            ? `SpecGuard: Jest reported no location for ${derived} test result(s) despite \`testLocationInResults\`; their line numbers were derived from the test source (mapped to the TypeScript source when the suite is compiled output)${fallback}. The test run is unaffected.\n`
+            : `SpecGuard: \`testLocationInResults\` is off, so line numbers for ${derived} test result(s) were derived from the test source (mapped to the TypeScript source when the suite is compiled output)${fallback}; set \`testLocationInResults: true\` in the Jest config for exact lines. The test run is unaffected.\n`,
         );
       }
 

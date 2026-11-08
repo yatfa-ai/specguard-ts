@@ -171,6 +171,16 @@ source that is outside the repository, under `node_modules` or not on disk, the 
 path and line, as it always has. If annotations still do not attribute, check that the map is being emitted
 and that `--enable-source-maps` makes no difference.
 
+The **Jest** adapter does the same for the `tsc` → `jest dist/` flow (a `testMatch` over your compiled `.js`
+tests): Jest reports the compiled file path, so a suite whose compiled file ends with a `//# sourceMappingURL=`
+trailer ships its rows under the TypeScript source path, and a crashed compiled suite is named by its source.
+With `testLocationInResults: true` Jest already reports the TypeScript line, which is shipped untouched; without
+it the line derived from the compiled suite is mapped through the source map to the TypeScript line. A line that
+cannot be mapped keeps the compiled path and line. A project whose `testFilePath` is already the `.ts` source
+(ts-jest, babel-jest) is unaffected. For a project that previously ran the compiled flow, row ids change once,
+when the rows move from the compiled path to the source path; row ids are derived from the file path, so the
+platform sees the first mapped run as new tests.
+
 **A test file that fails to run at all is not dropped.** A syntax error, a throwing top-level statement or a
 missing import fails the file before any test exists, so there are no test rows to ship — and silently
 shipping nothing would make the suite look smaller instead of broken. Every adapter (`node:test`, Vitest and
