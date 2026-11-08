@@ -2,10 +2,9 @@ import { it, expect } from "vitest";
 
 // Line numbers here are load-bearing: test/integration.vitest.test.ts asserts
 // which rows the annotation pass attributes to which `@intent`. A multi-line
-// `it.each` is reported at a line other than the one `it.each` opens on
-// (Vitest 4: the tagged form at its opener, the array form at the closing
-// `])("title", fn)` line), so the annotation sits several lines away from
-// the row. If you move anything, update that test.
+// array `it.each` is reported at its closing `])("title", fn)` line, not the
+// line `it.each` opens on, so the annotation sits several lines away from the
+// row. If you move anything, update that test.
 
 // @intent: {"entity":"Cart","action":"price lines","behavior":"prices every array-form row","layer":"unit"}
 it.each([

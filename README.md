@@ -200,9 +200,9 @@ lookup is ordered — the first arm that matches claims the annotation:
 
 **Multi-line `it.each` / `test.each`.** Vitest and Jest report the tests a parameterised table
 generates at a line that is not the line `it.each` opens on — a multi-line array table at its closing
-`])("title", fn)` line (Vitest 4; Jest reports both forms at their closing call), a tagged-template
-table at `` `("title", fn) `` in Vitest 4. When neither arm above matches, the pass resolves the line
-the example call *opens* on (the nearest preceding `it`/`test`/`specify`/`fit`/`xit`/`xtest` head —
+`])("title", fn)` line in both runners, and a tagged-template table at its closing `` `("title", fn) ``
+line in Jest. When neither arm above matches, the pass resolves the line the example call *opens* on
+(the nearest preceding `it`/`test`/`specify`/`fit`/`xit`/`xtest` head —
 the same recognition rule `specguard lint` uses, modifiers and `.each` tables included) whose
 statement reaches the reported line, and applies the same two arms there. So an `@intent:` above a
 multi-line `.each` opener — preceding-comment or trailing on the opener line — annotates every row
