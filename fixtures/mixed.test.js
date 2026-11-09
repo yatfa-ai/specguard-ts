@@ -20,4 +20,18 @@ describe("passing suite", () => {
   });
 
   test("child skipped", { skip: true }, () => {});
+
+  test("child skipped with reason", { skip: "flaky on CI" }, () => {});
+
+  test("child skipped via t.skip", (t) => {
+    t.skip("later");
+  });
+
+  test("child todo", { todo: true }, () => {});
+
+  test("child todo with reason", { todo: "implement later" }, () => {});
+
+  test("child todo throwing", { todo: "wip" }, () => {
+    throw new Error("deliberate todo failure");
+  });
 });

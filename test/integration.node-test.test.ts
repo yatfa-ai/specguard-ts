@@ -140,12 +140,12 @@ test("end to end: a real node:test run with zero annotations POSTs and is accept
   }
 });
 
-test("end to end: 4 tests in 2 describes produce exactly 4 rows, the failure reported once", async () => {
+test("end to end: 9 tests in 2 describes produce exactly 9 rows, the failure reported once", async () => {
   const srv = await captureServer();
   try {
     await runNodeTest("mixed.test.js", srv.url);
     const specs = srv.captured[0]!.body.specs;
-    assert.equal(specs.length, 4, JSON.stringify(specs.map((s) => s.name)));
+    assert.equal(specs.length, 9, JSON.stringify(specs.map((s) => s.name)));
     const failed = specs.filter((s) => s.outcome === "failed");
     assert.equal(failed.length, 1);
     assert.equal(failed[0]!.name, "passing suite > child failing");
@@ -183,6 +183,19 @@ test("end to end: line numbers, relative paths, composed names, seconds duration
 
     // skipped ships as pending, not passed
     assert.equal(byName.get("passing suite > child skipped")?.outcome, "pending");
+
+    // reason-string skips, t.skip('why') and every todo (throwing included) are skip-family too
+    for (const name of [
+      "child skipped with reason",
+      "child skipped via t.skip",
+      "child todo",
+      "child todo with reason",
+      "child todo throwing",
+    ]) {
+      assert.equal(byName.get(`passing suite > ${name}`)?.outcome, "pending", name);
+    }
+    // the throwing todo is not a failure: the only failed row is still "child failing"
+    assert.equal(specs.filter((s) => s.outcome === "failed").length, 1);
 
     // ci_run_id / shard_id strings on the wire — assert on the raw JSON
     const raw = JSON.stringify(srv.captured[0]!.body);
@@ -274,7 +287,7 @@ test("no API key: the run is written to the LOCAL sink, the replay queue is not 
     const local = readFileSync(join(tmp, "local.jsonl"), "utf8").trim().split("\n");
     assert.equal(local.length, 1);
     const parsed = JSON.parse(local[0]!) as Envelope;
-    assert.equal(parsed.specs.length, 4);
+    assert.equal(parsed.specs.length, 9);
     assert.equal(parsed.commit_sha, "deadbeef");
     // ...and the replay queue is NOT touched — the two sinks are asserted
     // separately because a single shared file is exactly the defect this

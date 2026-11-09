@@ -151,8 +151,12 @@ Five things in the raw event stream would silently corrupt the payload, and the 
    LIFO order, which is pinned by a test because it is an observed behaviour, not a documented guarantee).
    Identity on the platform is semantic and derived from the text, so a bare leaf like `"works"` is not
    distinguishing.
-5. **A skipped test emits `test:pass` with `skip: true`** — shipped with outcome `"pending"`, never
-   silently counted as a pass.
+5. **A skipped test emits `test:pass` with `skip` set** — `true`, or the author's reason string
+   (`{ skip: 'flaky on CI' }`, `t.skip('later')`) — and a `todo` test (`todo: true` or a reason string) is
+   skip-family too. All ship with outcome `"pending"`, never silently counted as a pass. A `todo` test that
+   throws emits `test:fail`, but node does not count it as a failure (exit 0), so it also ships `"pending"`
+   and does not count as a failed row for its file. The wire has no separate todo vocabulary, so a todo is
+   indistinguishable from a skip on the server.
 
 One more, discovered while testing: **a test file that contains zero tests emits one synthetic `test:pass`
 for the file itself** (its name is the file path — absolute on Node 20, relative to the working directory on
