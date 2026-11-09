@@ -69,6 +69,19 @@ import type { LintFinding } from "./lint.js";
  * right after the run and this one requires the example there, so those two
  * are disjoint by construction as well.
  *
+ * The ABOVE-GROUP arm (SPGD-2137) is a fifth way to be dead, mirroring
+ * specguard-ruby `scanner.rb` `group_above_findings_in_text`: a comment-form
+ * `@intent:` run whose NEXT line is a `describe|suite|context` group line.
+ * Extraction is example-anchored — it reads only the line directly above an
+ * example — so no test can claim a run that ends at a group line, and every
+ * line of the run is dead while linting clean. A group line that also opens
+ * an example on the same line is that example's own line, so the run above
+ * it is claimed and is not flagged. The stacked, shadow and separated arms
+ * need an example line (or a blank/comment interleave) after the run and
+ * this one needs a group line there, so a run is never flagged by two arms.
+ * Ruby's shared-example invocation keywords have no TS counterpart and are
+ * deliberately not mirrored.
+ *
  * What counts as an "example line" in every arm above is ONE recognition
  * rule (EXAMPLE_CALL_SOURCE), not an enumerated list: a call head
  * (`it`/`test`/`specify`/`xit`/`fit`/`xtest`) plus any modifier chain, so the
@@ -158,6 +171,14 @@ const UNREACHABLE_GROUP_ANNOTATION =
   "and annotations attach to tests, never to groups (SPGD-12 §2) — extraction is " +
   "one-line and example-anchored, so no test below can ever claim it. Move the payload " +
   "onto the test's own line, or to a `// @intent:` comment line directly above the test";
+
+/** Why a comment run directly above a group line fails: no test can claim it. */
+const UNREACHABLE_ABOVE_GROUP_ANNOTATION =
+  "unreachable annotation: this @intent: sits directly above a describe/suite/context " +
+  "group line, and annotations attach to tests, never to groups (SPGD-12 §2) — extraction " +
+  "is example-anchored and reads only the line directly above a test, so this annotation " +
+  "is discarded. Move it to a `// @intent:` comment line directly above the test inside " +
+  "the group, or onto the test's own line";
 
 /** Why a separated annotation fails: one intervening blank/comment line puts
  * the example out of the one-line lookback's reach. */
@@ -373,10 +394,9 @@ export function ownLineShadowFindingsInText(text: string, file: string): LintFin
  * describe/suite/context GROUP line carrying a trailing `@intent:` payload
  * (INTENT_WITH_PAYLOAD), for lines that define no example of their own
  * (EXAMPLE_ON_LINE). Comment-only (`//`-leading) lines are left to the
- * stacked pass above: a comment above a group is a different shape,
- * deliberately out of scope here (SPGD-1524 flags the group line ITSELF,
- * mirroring Ruby SPGD-1510). The guards run in the same order as the Ruby
- * twin's `group_line_findings_in_text`, and the one-liner exemption is
+ * comment-run passes (see groupAboveFindingsInText): this pass flags the
+ * group line ITSELF (SPGD-1524, mirroring Ruby SPGD-1510). The guards run in
+ * the same order as the Ruby twin's `group_line_findings_in_text`, and the one-liner exemption is
  * tested against the code BEFORE the token only, split on the token, so
  * payload prose can never exempt anything.
  */
@@ -408,6 +428,53 @@ export function groupLineFindingsInText(text: string, file: string): LintFinding
 }
 
 /**
+ * The above-group findings for one file's source text, in line order: EVERY
+ * line of a comment-form `@intent:` run whose immediately-following line is a
+ * describe/suite/context GROUP line (GROUP_LINE). The lookback reads only the
+ * line directly above a test, so nothing in the run is claimed. A group line
+ * that also opens an example on the same line (EXAMPLE_ON_LINE, tested against
+ * the code before any trailing token, as in groupLineFindingsInText) is that
+ * example's own line, so the run above it is not flagged.
+ */
+export function groupAboveFindingsInText(text: string, file: string): LintFinding[] {
+  const lines = text.split("\n");
+  const findings: LintFinding[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    if (!COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+      continue;
+    }
+
+    const runStart = i;
+    i += 1;
+    while (i < lines.length && COMMENT_INTENT_LINE.test(lines[i]!)) {
+      i += 1;
+    }
+    const runEnd = i; // exclusive; lines[runEnd] is the line after the run
+
+    const target = lines[runEnd];
+    if (target === undefined || !GROUP_LINE.test(target)) continue;
+    if (EXAMPLE_ON_LINE.test(target.split("@intent:")[0]!)) continue;
+
+    for (let j = runStart; j < runEnd; j += 1) {
+      findings.push({
+        file,
+        line: j + 1,
+        kind: "unreachable",
+        ok: false,
+        errors: [UNREACHABLE_ABOVE_GROUP_ANNOTATION],
+        intent: null,
+        aboutFile: false,
+      });
+    }
+  }
+
+  return findings;
+}
+
+/**
  * The structural findings over the selection. A file the pass cannot read —
  * unreadable, or over SCAN_MAX_BYTES, the same budget `scanTokens` applies —
  * contributes NOTHING: the existing exit-2 arms already speak for such files
@@ -426,7 +493,7 @@ export function unreachableFindings(files: string[]): LintFinding[] {
     }
     if (buf.byteLength > SCAN_MAX_BYTES) continue;
     const text = buf.toString("utf8");
-    // Ruby parity (scanner.rb `unreachable_findings_in_text`, four arms, all
+    // Ruby parity (scanner.rb `unreachable_findings_in_text`, all
     // mirrored in Ruby; the separated and own-line-shadow arms originated in
     // TS, SPGD-1550/1556, mirrored in SPGD-1554/1560): the
     // arms are disjoint by construction — the stacked pass reads only
@@ -435,7 +502,8 @@ export function unreachableFindings(files: string[]): LintFinding[] {
     // the same runs and example but flags ONLY the run's last line, and only
     // when that example carries its own payload, the separated pass needs a
     // blank/comment right after the run, the group pass only lines that are
-    // not `//`-leading — so the merge cannot double-flag a line, and the per-file sort restores the
+    // not `//`-leading, and the above-group pass needs a group line right
+    // after the run (never an example line) — so the merge cannot double-flag a line, and the per-file sort restores the
     // file-then-line order `unreachableFindings` promises. (`?? 0` is a type
     // accommodation only — ValidatorFinding.line is nullable for binary rows,
     // but every arm above always emits a 1-based line.)
@@ -444,6 +512,7 @@ export function unreachableFindings(files: string[]): LintFinding[] {
       ...separatedFindingsInText(text, file),
       ...ownLineShadowFindingsInText(text, file),
       ...groupLineFindingsInText(text, file),
+      ...groupAboveFindingsInText(text, file),
     ];
     perFile.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
     findings.push(...perFile);
