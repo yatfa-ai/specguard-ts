@@ -1,5 +1,5 @@
 import { VitestCollector } from "./collector.js";
-import { readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
+import { emptyRunnerEnv, readRunnerEnv, withNativeShard, type RunnerEnv } from "../core/env.js";
 import { resolveRunRoots } from "../core/path-root.js";
 import { shipRun } from "../core/ship-run.js";
 import type { TransportDeps } from "../core/transport.js";
@@ -76,18 +76,7 @@ export class SpecguardVitestReporter {
       env = this.options.env ?? readRunnerEnv();
     } catch {
       // readRunnerEnv never throws on its own; this is the backstop.
-      env = {
-        commitSha: null,
-        branch: null,
-        ciRunId: null,
-        shardId: null,
-        endpoint: null,
-        apiKey: null,
-        repositoryId: null,
-        timeoutMs: 10_000,
-        outputPath: "log/test_results.jsonl",
-        localOutputPath: "log/test_results.local.jsonl",
-      };
+      env = emptyRunnerEnv();
     }
     this.env = env;
     this.startedAtMs = Date.now();

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
+  emptyRunnerEnv,
   nativeShardIndex,
   readRunnerEnv,
   shardIndexFromTestShardFlag,
@@ -599,4 +600,15 @@ test("ci_run_id is untouched by the pull_request resolution", () => {
     env: prEnv("pull_request", eventFile(payload("acme/app")), { GITHUB_RUN_ID: "17442" }),
   });
   assert.equal(e.ciRunId, "17442");
+});
+
+test("emptyRunnerEnv has every RunnerEnv key, readRunnerEnv's defaults, and is fresh per call", () => {
+  const empty = emptyRunnerEnv();
+  const resolved = readRunnerEnv({ env: {} as NodeJS.ProcessEnv });
+  assert.deepEqual(Object.keys(empty).sort(), Object.keys(resolved).sort());
+  assert.equal(empty.timeoutMs, resolved.timeoutMs);
+  assert.equal(empty.outputPath, resolved.outputPath);
+  assert.equal(empty.localOutputPath, resolved.localOutputPath);
+  assert.notEqual(emptyRunnerEnv(), empty);
+  assert.deepEqual(emptyRunnerEnv(), empty);
 });

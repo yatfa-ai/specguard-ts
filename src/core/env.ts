@@ -30,6 +30,33 @@ export interface RunnerEnv {
   localOutputPath: string;
 }
 
+/** Default delivery timeout in milliseconds (`SPECGUARD_TIMEOUT` unset or unusable). */
+const DEFAULT_TIMEOUT_MS = 10_000;
+/** Default replay-queue path (`SPECGUARD_OUTPUT_PATH` unset or blank). */
+const DEFAULT_OUTPUT_PATH = "log/test_results.jsonl";
+/** Default local-record path (`SPECGUARD_LOCAL_OUTPUT_PATH` unset or blank). */
+const DEFAULT_LOCAL_OUTPUT_PATH = "log/test_results.local.jsonl";
+
+/**
+ * The all-null, all-default {@link RunnerEnv} — what a reporter falls back to
+ * if `readRunnerEnv` ever throws. A FRESH object on every call: reporters
+ * keep a mutable `env` that `onInit` replaces via {@link withNativeShard}.
+ */
+export function emptyRunnerEnv(): RunnerEnv {
+  return {
+    commitSha: null,
+    branch: null,
+    ciRunId: null,
+    shardId: null,
+    endpoint: null,
+    apiKey: null,
+    repositoryId: null,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    outputPath: DEFAULT_OUTPUT_PATH,
+    localOutputPath: DEFAULT_LOCAL_OUTPUT_PATH,
+  };
+}
+
 /**
  * First env value that carries content, trimmed — the port of the Ruby
  * client's `Configuration#first_present`, which does `env[key].to_s.strip`
@@ -296,9 +323,9 @@ export function readRunnerEnv(
     timeoutMs:
       Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
         ? timeoutSeconds * 1000
-        : 10_000,
-    outputPath: firstEnv(env, ["SPECGUARD_OUTPUT_PATH"]) ?? "log/test_results.jsonl",
+        : DEFAULT_TIMEOUT_MS,
+    outputPath: firstEnv(env, ["SPECGUARD_OUTPUT_PATH"]) ?? DEFAULT_OUTPUT_PATH,
     localOutputPath:
-      firstEnv(env, ["SPECGUARD_LOCAL_OUTPUT_PATH"]) ?? "log/test_results.local.jsonl",
+      firstEnv(env, ["SPECGUARD_LOCAL_OUTPUT_PATH"]) ?? DEFAULT_LOCAL_OUTPUT_PATH,
   }, hints.shardIndex);
 }
