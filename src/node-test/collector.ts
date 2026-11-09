@@ -17,8 +17,10 @@ export interface TestEventData {
   file?: string;
   line?: number;
   column?: number;
-  skip?: boolean | undefined;
-  todo?: boolean | undefined;
+  /** `true`, or the author's reason string (`{ skip: 'flaky on CI' }`, `t.skip('later')`). */
+  skip?: boolean | string | undefined;
+  /** `true`, or the author's reason string (`{ todo: 'implement later' }`). */
+  todo?: boolean | string | undefined;
   details?: {
     type?: string | undefined;
     duration_ms?: number | undefined;
@@ -145,9 +147,15 @@ export class RunCollector {
     // node reports MILLISECONDS.
     const duration = msToSeconds(durationMs);
 
-    // A skipped test emits test:pass with skip: true — it is deliberately
-    // shipped with outcome "pending", never silently counted as a pass.
-    const outcome = kind === "fail" ? "failed" : data.skip === true ? "pending" : "passed";
+    // A skipped test emits test:pass with `skip` set — `true`, or the
+    // author's reason string — and a todo test carries `todo` the same way.
+    // Both are the skip family: deliberately shipped with outcome "pending",
+    // never silently counted as a pass. A todo test that throws emits
+    // test:fail, but node itself does not count it as a failure (exit 0), so
+    // it ships "pending" too — and, not being a real failure, must not enter
+    // `filesWithFailedRow`, which suppresses the file-level crash row.
+    const skipFamily = Boolean(data.skip) || Boolean(data.todo);
+    const outcome = skipFamily ? "pending" : kind === "fail" ? "failed" : "passed";
 
     if (outcome === "failed") {
       this.filesWithFailedRow.add(filePath);

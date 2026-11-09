@@ -23,7 +23,8 @@ function result(
     kind?: "pass" | "fail";
     type?: string;
     durationMs?: number;
-    skip?: boolean;
+    skip?: boolean | string;
+    todo?: boolean | string;
   } = {},
 ): void {
   collector.onResult(
@@ -33,6 +34,7 @@ function result(
       file: FILE,
       line,
       skip: extra.skip === undefined ? undefined : extra.skip,
+      todo: extra.todo === undefined ? undefined : extra.todo,
       details:
         extra.type === undefined && extra.durationMs === undefined
           ? undefined
@@ -169,6 +171,60 @@ test("a skipped test ships as pending, never silently as a pass", () => {
   start(c, "skipped one", 0);
   result(c, "skipped one", 0, 3, { skip: true });
   assert.equal(c.getRows()[0]?.outcome, "pending");
+});
+
+test("a reason-string skip and every todo test ship as pending", () => {
+  const c = collector();
+  const cases: Array<[string, { skip?: boolean | string; todo?: boolean | string }]> = [
+    ["skip with reason", { skip: "flaky on CI" }],
+    ["todo true", { todo: true }],
+    ["todo with reason", { todo: "implement later" }],
+  ];
+  cases.forEach(([name, extra], i) => {
+    start(c, name, 0);
+    result(c, name, 0, i + 3, extra);
+  });
+  assert.deepEqual(c.getRows().map((r) => r.outcome), ["pending", "pending", "pending"]);
+});
+
+test("falsy skip/todo values (false, empty string) are not skip-family", () => {
+  const c = collector();
+  start(c, "plain", 0);
+  result(c, "plain", 0, 3, { skip: false, todo: "" });
+  assert.equal(c.getRows()[0]?.outcome, "passed");
+});
+
+test("a failing todo test ships pending, a genuine failure still ships failed", () => {
+  const c = collector();
+  start(c, "todo throws", 0);
+  result(c, "todo throws", 0, 3, { kind: "fail", todo: "wip" });
+  start(c, "real failure", 0);
+  result(c, "real failure", 0, 6, { kind: "fail" });
+  assert.deepEqual(c.getRows().map((r) => r.outcome), ["pending", "failed"]);
+});
+
+test("a failing todo is not a failed row: a later file-level failure still ships its crash row", () => {
+  const c = collector();
+  start(c, "todo throws", 0);
+  result(c, "todo throws", 0, 3, { kind: "fail", todo: true });
+  // the file-level event of a file that then failed on its own
+  start(c, FILE, 0);
+  c.onResult({ name: FILE, nesting: 0, file: FILE, line: 1 }, "fail");
+  const rows = c.getRows();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.outcome, "pending");
+  assert.equal(rows[1]?.outcome, "failed");
+});
+
+test("a failed suite whose only failing child is a todo still ships its hook-failure file row", () => {
+  const c = collector();
+  start(c, "suite", 0);
+  start(c, "todo throws", 1);
+  result(c, "todo throws", 1, 4, { kind: "fail", todo: true });
+  result(c, "suite", 0, 2, { kind: "fail", type: "suite" });
+  const rows = c.getRows();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.outcome), ["pending", "failed"]);
 });
 
 test("every row carries a stable, unique id, identical across two identical runs", () => {
