@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 
 import { lint, EXIT_OK, EXIT_MALFORMED, EXIT_MISUSE } from "../src/lint/lint.js";
 import { renderJson, renderHuman, provenanceLine } from "../src/lint/report.js";
-import { ownLineShadowFindingsInText } from "../src/lint/unreachable.js";
+import { groupAboveFindingsInText, ownLineShadowFindingsInText } from "../src/lint/unreachable.js";
 import {
   selectFiles,
   changedNameUnion,
@@ -3051,12 +3051,103 @@ test("SPGD-1564: the shadow scan covers the WHOLE file — two independent runs 
   assert.equal(report.summary.malformed, 2);
 });
 
-test("SPGD-1564: a comment run above a describe group line with a trailing payload is the GROUP arm's one finding, not also the shadow arm's", () => {
+test("SPGD-1564: a comment run above a describe group line with a trailing payload gets one finding per dead line, none from the shadow arm", () => {
   const groupLine = `describe("g", () => { ${SHADOW_TRAIL}`;
   const { report, flagged } = sepRun("shadow-group-below", [SEP_INTENT, groupLine], [1, 2]);
-  assert.deepEqual(flagged, [2]);
+  // Line 2 is the group arm's; line 1 (the run above the group) is the
+  // above-group arm's (SPGD-2137). Neither line is flagged twice.
+  assert.deepEqual(flagged, [1, 2]);
   assert.equal(report.exitCode, EXIT_MALFORMED);
   assert.deepEqual(ownLineShadowFindingsInText([SEP_INTENT, groupLine, ""].join("\n"), "f.test.js"), []);
+});
+
+// ── SPGD-2137: the ABOVE-GROUP unreachable arm ─────────────────────────────
+// A well-formed comment-form `@intent:` run whose next line is a
+// describe/suite/context group line is discarded at extraction (annotations
+// attach to tests; the lookback reads only the line directly above a test)
+// while the binary validates it clean. Replaces the old non-flag: a comment
+// above a group used to lint clean.
+
+test("SPGD-2137: an @intent comment directly above a describe group line exits 1 with one FAIL row", () => {
+  const { file, report, flagged } = sepRun(
+    "above-describe",
+    [SEP_INTENT, 'describe("Cart", () => {', '  test("adds", () => {});', "});"],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.ok(!report.ok);
+  assert.deepEqual(flagged, [1]);
+  const row = report.findings.find((x) => x.kind === "unreachable")!;
+  assert.equal(row.file, file);
+  assert.equal(row.ok, false);
+  assert.ok(row.errors[0]?.includes("never to groups"));
+  assert.match(renderHuman(report), /FAIL above-describe\.test\.js:1 \(unreachable\)/);
+  assert.equal(report.summary.annotations, 1);
+  assert.equal(report.summary.malformed, 1);
+});
+
+test("SPGD-2137: the same @intent directly above a test stays green (negative control)", () => {
+  const { report, flagged } = sepRun(
+    "above-test",
+    ['describe("Cart", () => {', "  " + SEP_INTENT, '  test("adds", () => {});', "});"],
+    [2],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+  assert.equal(report.summary.malformed, 0);
+});
+
+test("SPGD-2137: every group keyword and modifier form is a target", () => {
+  for (const head of [
+    'describe("g", () => {',
+    'suite("g", () => {',
+    'context("g", () => {',
+    'describe.only("g", () => {',
+    'describe.skip("g", () => {',
+    'describe.each([1])("g", () => {',
+  ]) {
+    assert.deepEqual(
+      groupAboveFindingsInText([SEP_INTENT, head, ""].join("\n"), "f.test.js").map((x) => x.line),
+      [1],
+      head,
+    );
+  }
+});
+
+test("SPGD-2137: every line of a run above a group is flagged, the last included", () => {
+  const { report, flagged } = sepRun(
+    "run-above-describe",
+    [SEP_INTENT, SEP_INTENT_2, 'describe("Cart", () => {', '  test("adds", () => {});', "});"],
+    [1, 2],
+  );
+  assert.equal(report.exitCode, EXIT_MALFORMED);
+  assert.deepEqual(flagged, [1, 2]);
+  assert.equal(report.summary.malformed, 2);
+});
+
+test("SPGD-2137: a one-liner group that opens its own test is that test's own line — the run above it is not flagged", () => {
+  const { report, flagged } = sepRun(
+    "above-oneliner",
+    [SEP_INTENT, 'describe("Cart", () => { test("adds", () => {}); });'],
+    [1],
+  );
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(flagged, []);
+});
+
+test("SPGD-2137: a blank or ordinary comment between the run and the group takes it out of this arm", () => {
+  for (const between of ["", "// an ordinary note"]) {
+    assert.deepEqual(
+      groupAboveFindingsInText([SEP_INTENT, between, 'describe("g", () => {', ""].join("\n"), "f.test.js"),
+      [],
+      JSON.stringify(between),
+    );
+  }
+});
+
+test("SPGD-2137: an identifier that merely starts with a group keyword is not a group line", () => {
+  assert.deepEqual(groupAboveFindingsInText([SEP_INTENT, 'describeCart("g");', ""].join("\n"), "f.test.js"), []);
+  assert.deepEqual(groupAboveFindingsInText([SEP_INTENT, 'contextual("g");', ""].join("\n"), "f.test.js"), []);
 });
 
 // --- SPGD-1539: the lint-side registers are POSIX-separated ----------------
